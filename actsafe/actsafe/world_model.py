@@ -212,7 +212,7 @@ class WorldModel(eqx.Module):
             key, prior_key = jax.random.split(key)
             id = jax.random.randint(prior_key, (), 0, self.cell.ensemble_size)
             state = jax.tree_map(lambda x: x[id], ensemble_states)
-            return state, (state, ensemble_states, prior)
+            return state, (action, state, ensemble_states, prior)
 
         if isinstance(policy, jax.Array):
             inputs: tuple[jax.Array, jax.Array] | jax.Array = (
@@ -226,7 +226,7 @@ class WorldModel(eqx.Module):
             raise ValueError("policy must be callable or jax.Array")
         if isinstance(initial_state, jax.Array):
             initial_state = State.from_flat(initial_state, self.cell.stochastic_size)
-        _, (trajectory, ensemble_trajectories, priors) = jax.lax.scan(
+        _, (actions, trajectory, ensemble_trajectories, priors) = jax.lax.scan(
             f, initial_state, inputs
         )
         # vmap twice: once for the ensemble, and second time for the horizon
@@ -234,7 +234,7 @@ class WorldModel(eqx.Module):
         # Ensemble axis before time axis.
         out, priors = _ensemble_first((out, priors))
         reward, cost = out[..., :-1], out[..., -1]
-        out = Prediction(trajectory.flatten(), reward, cost)
+        out = Prediction(actions, trajectory.flatten(), reward, cost)
         return out, priors
 
 

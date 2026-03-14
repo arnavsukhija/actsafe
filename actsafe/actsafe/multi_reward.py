@@ -20,9 +20,11 @@ class MultiRewardBridge(eqx.Module):
             horizon, initial_state, key, policy
         )
         trajectory, distributions = samples
+        rewards = trajectory.reward[..., self.reward_index]
         trajectory = Prediction(
-            trajectory.next_state,
-            trajectory.reward[..., self.reward_index],
-            trajectory.cost,
+            samples[0].action,
+            samples[0].next_state,
+            rewards,
+            samples[0].cost,
         )
         return trajectory, distributions

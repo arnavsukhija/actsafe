@@ -21,7 +21,13 @@ class OpaxBridge(eqx.Module):
         samples: tuple[Prediction, ShiftScale] = self.model.sample(
             horizon, initial_state, key, policy
         )
-        trajectory, distributions = samples
+        trajectory = Prediction(
+            samples[0].action,
+            samples[0].next_state,
+            samples[0].reward, # Assuming Prediction has a 'reward' field
+            samples[0].cost,
+        )
+        distributions = samples[1]
         return opax.modify_reward(
             trajectory, distributions, self.reward_scale, self.reward_epistemic_scale
         )

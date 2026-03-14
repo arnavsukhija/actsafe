@@ -47,6 +47,7 @@ class Agent(Protocol):
 
 
 class Prediction(NamedTuple):
+    action: jax.Array
     next_state: jax.Array
     reward: jax.Array
     cost: jax.Array

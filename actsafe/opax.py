@@ -19,6 +19,7 @@ def modify_reward(
     if stop_grad:
         new_rewards = jax.lax.stop_gradient(new_rewards)
     return Prediction(
+        trajectory.action,
         trajectory.next_state,
         new_rewards,
         trajectory.cost,
