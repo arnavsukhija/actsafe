@@ -382,6 +382,11 @@ def update_safe_actor_critic(
 
 
 def compute_discount(factor: jax.Array, length: int) -> jax.Array:
-    d = jnp.cumprod(factor[: length - 1])
-    d = jnp.concatenate([jnp.ones((1,)), d])
+    if factor.ndim == 0:
+        d = jnp.cumprod(factor * jnp.ones((length - 1,)))
+        d = jnp.concatenate([jnp.ones((1,)), d], axis=-1)
+    else:
+        d = jnp.cumprod(factor[..., : length - 1], axis=-1)
+        padding_shape = factor.shape[:-1] + (1,)
+        d = jnp.concatenate([jnp.ones(padding_shape), d], axis=-1)
     return d
