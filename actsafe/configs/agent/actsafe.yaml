@@ -42,6 +42,11 @@ model_optimizer:
 discount: 0.99
 safety_discount: 0.99
 lambda_: 0.95
+continuous_time:
+  enabled: false
+  t_min: 0.01
+  t_max: 0.5
+  base_dt: 0.01
 plan_horizon: 15
 update_steps: 100
 train_every: 1000

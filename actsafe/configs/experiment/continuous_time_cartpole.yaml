@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - override /environment: dm_cartpole
+  - override /agent: actsafe
+
+training:
+  action_repeat: 1  # Base simulation resolution
+  epochs: 50
+  
+agent:
+  continuous_time:
+    enabled: true
+    t_min: 0.01
+    t_max: 0.5
+    # base_dt is dynamically inferred at runtime from the env
+    
+environment:
+  dm_cartpole:
+    task: safe_swingup_sparse_hard

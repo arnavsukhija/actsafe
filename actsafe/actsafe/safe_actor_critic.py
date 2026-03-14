@@ -27,6 +27,8 @@ class ActorEvaluation(NamedTuple):
     priors: ShiftScale
     reward_stddev: jax.Array
     cost_stddev: jax.Array
+    discount: jax.Array
+    safety_discount: jax.Array
 
 
 class Penalizer(Protocol):
@@ -56,6 +58,10 @@ class SafeModelBasedActorCritic:
         safety_discount: float,
         lambda_: float,
         safety_budget: float,
+        continuous_time: bool,
+        tmin: float | None,
+        tmax: float | None,
+        base_dt: float | None,
         key: jax.Array,
         penalizer: Penalizer,
         objective_sentiment: Sentiment,
@@ -78,9 +84,13 @@ class SafeModelBasedActorCritic:
         )
         self.horizon = horizon
         self.discount = discount
-        self.lambda_ = lambda_
         self.safety_discount = safety_discount
+        self.lambda_ = lambda_
         self.safety_budget = safety_budget
+        self.continuous_time = continuous_time
+        self.tmin = tmin
+        self.tmax = tmax
+        self.base_dt = base_dt
         self.penalizer = penalizer
         self.objective_sentiment = objective_sentiment
         self.constraint_sentiment = constraint_sentiment
@@ -109,6 +119,10 @@ class SafeModelBasedActorCritic:
             self.safety_discount,
             self.lambda_,
             self.safety_budget,
+            self.continuous_time,
+            self.tmin,
+            self.tmax,
+            self.base_dt,
             self.penalizer,
             self.penalizer.state,
             self.objective_sentiment,
@@ -148,20 +162,27 @@ class SafeActorCriticStepResults(NamedTuple):
     new_penalty_state: Any
     metrics: dict[str, jax.Array]
 
-
-def discounted_cumsum(x: jax.Array, discount: float) -> jax.Array:
+def discounted_cumsum(x: jax.Array, discount: jax.Array) -> jax.Array:
+    if discount.ndim > 0:
+        # need to apply variable discounting
+        def body(carry, inputs):
+            td, gamma = inputs
+            res = td + gamma * carry
+            return res, res
+        _, result = jax.lax.scan(body, jnp.zeros_like(x[0]), (x[::-1], discount[::-1]))
+        return result[::-1]
+    
     # [1, discount, discount^2 ...]
     scales = jnp.cumprod(jnp.ones_like(x)[:-1] * discount)
     scales = jnp.concatenate([jnp.ones_like(scales[:1]), scales], -1)
     # Flip scales since jnp.convolve flips it as default.
     return jnp.convolve(x, scales[::-1])[-x.shape[0] :]
 
-
 def compute_lambda_values(
-    next_values: jax.Array, rewards: jax.Array, discount: float, lambda_: float
+    next_values: jax.Array, rewards: jax.Array, discount: jax.Array, lambda_: float
 ) -> jax.Array:
     tds = rewards + (1.0 - lambda_) * discount * next_values
-    tds = tds.at[-1].add(lambda_ * discount * next_values[-1])
+    tds = tds.at[-1].add(lambda_ * discount[-1] * next_values[-1])
     return discounted_cumsum(tds, lambda_ * discount)
 
 
@@ -169,7 +190,7 @@ def critic_loss_fn(
     critic: Critic,
     trajectories: jax.Array,
     lambda_values: jax.Array,
-    discount: float,
+    discount: jax.Array,
     horizon: int,
 ) -> jax.Array:
     planning_discount = compute_discount(discount, horizon - 1)
@@ -189,31 +210,58 @@ def evaluate_actor(
     horizon: int,
     initial_states: jax.Array,
     key: jax.Array,
-    discount: float,
-    safety_discount: float,
+    base_discount: float,
+    base_safety_discount: float,
     lambda_: float,
     safety_budget: float,
+    continuous_time: bool,
+    tmin: float | None,
+    tmax: float | None,
+    base_dt: float | None,
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
 ) -> ActorEvaluation:
     trajectories, priors = rollout_fn(horizon, initial_states, key, actor.act)
+    
+    if continuous_time:
+        # Extract dt pseudo_action to calculate true discounting for each step
+        # Actions are shape [batch_size, horizon, action_dim]
+        actions = trajectories.action
+        pseudo_time = actions[..., -1]
+        
+        time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
+        dt_ratio = jnp.floor(time_for_action / base_dt)
+        
+        # Compute per-step discounts: shape [batch_size, horizon]
+        discount = base_discount ** dt_ratio
+        safety_discount = base_safety_discount ** dt_ratio
+    else:
+        # Create uniform discount array over the horizon for all batches
+        shape = trajectories.action.shape[:-1]
+        discount = jnp.full(shape, base_discount)
+        safety_discount = jnp.full(shape, base_safety_discount)
+        
     next_step = lambda x: x[:, 1:]
     current_step = lambda x: x[:, :-1]
+    
+    discount_current = current_step(discount)
+    safety_discount_current = current_step(safety_discount)
+    
     next_states = next_step(trajectories.next_state)
     bootstrap_values = nest_vmap(critic, 2, eqx.filter_vmap)(next_states)
     rewards = current_step(objective_sentiment(trajectories.reward, priors))
     lambda_values = eqx.filter_vmap(compute_lambda_values)(
-        bootstrap_values, rewards, discount, lambda_
+        bootstrap_values, rewards, discount_current, lambda_
     )
     bootstrap_safety_values = nest_vmap(safety_critic, 2, eqx.filter_vmap)(next_states)
     costs = current_step(constraint_sentiment(trajectories.cost, priors))
     safety_lambda_values = eqx.filter_vmap(compute_lambda_values)(
         bootstrap_safety_values,
         costs,
-        safety_discount,
+        safety_discount_current,
         lambda_,
     )
-    planning_discount = compute_discount(discount, horizon - 1)
+    planning_discount = eqx.filter_vmap(compute_discount)(discount_current, horizon - 1)
     objective = (lambda_values * planning_discount).mean()
     loss = -objective
     constraint = safety_budget - safety_lambda_values.mean()
@@ -227,6 +275,8 @@ def evaluate_actor(
         priors,
         trajectories.reward.std(1).mean(),
         trajectories.cost.std(1).mean(),
+        discount_current,
+        safety_discount_current
     )
 
 
@@ -253,6 +303,10 @@ def update_safe_actor_critic(
     safety_discount: float,
     lambda_: float,
     safety_budget: float,
+    continuous_time: bool,
+    tmin: float | None,
+    tmax: float | None,
+    base_dt: float | None,
     penalty_fn: Penalizer,
     penalty_state: Any,
     objective_sentiment: Sentiment,
@@ -272,6 +326,10 @@ def update_safe_actor_critic(
             safety_discount,
             lambda_,
             safety_budget,
+            continuous_time,
+            tmin,
+            tmax,
+            base_dt,
             objective_sentiment,
             constraint_sentiment,
         ),
@@ -283,7 +341,7 @@ def update_safe_actor_critic(
     )
     critics_grads_fn = eqx.filter_value_and_grad(critic_loss_fn)
     critic_loss, grads = critics_grads_fn(
-        critic, evaluation.trajectories, evaluation.objective_values, discount, horizon
+        critic, evaluation.trajectories, evaluation.objective_values, evaluation.discount, horizon
     )
     new_critic, new_critic_state = critic_learner.grad_step(
         critic, grads, critic_learning_state
@@ -293,7 +351,7 @@ def update_safe_actor_critic(
         safety_critic,
         evaluation.trajectories,
         cost_values,
-        safety_discount,
+        evaluation.safety_discount,
         horizon,
     )
     new_safety_critic, new_safety_critic_state = safety_critic_learner.grad_step(
@@ -323,7 +381,7 @@ def update_safe_actor_critic(
     )
 
 
-def compute_discount(factor, length):
-    d = jnp.cumprod(factor * jnp.ones((length - 1,)))
+def compute_discount(factor: jax.Array, length: int) -> jax.Array:
+    d = jnp.cumprod(factor[: length - 1])
     d = jnp.concatenate([jnp.ones((1,)), d])
     return d

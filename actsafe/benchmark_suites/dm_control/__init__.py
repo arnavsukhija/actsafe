@@ -287,6 +287,17 @@ def make(cfg: DictConfig) -> EnvironmentFactory:
             env = FlattenObservation(env)
         if cfg.training.trainer == "unsupervised":
             env = CartpoleUnsupervisedWrapper(env)
+            
+        if cfg.agent.get("continuous_time", {}).get("enabled", False):
+            from actsafe.rl.wrappers import SwitchCostWrapper
+            ct_cfg = cfg.agent.continuous_time
+            env = SwitchCostWrapper(
+                env, 
+                tmin=ct_cfg.get("t_min", 0.01), 
+                tmax=ct_cfg.get("t_max", 0.5),
+                discounting=cfg.agent.discount
+            )
+            
         return env
 
     return make_env

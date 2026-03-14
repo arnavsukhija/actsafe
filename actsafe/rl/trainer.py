@@ -4,7 +4,7 @@ import time
 from typing import Optional
 
 import cloudpickle
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import numpy as np
 
 from actsafe import benchmark_suites
@@ -91,6 +91,16 @@ class Trainer:
     def make_agent(self) -> ActSafe:
         assert self.env is not None
         if self.config.agent.name == "actsafe":
+            if self.config.agent.get("continuous_time", {}).get("enabled", False):
+                dt_vals = self.env.get_attr("dt")
+                if dt_vals and dt_vals[0] is not None:
+                    _LOG.info(f"Dynamically extracted base_dt={dt_vals[0]} from environment.")
+                    OmegaConf.set_struct(self.config, False)
+                    self.config.agent.continuous_time.base_dt = float(dt_vals[0])
+                    OmegaConf.set_struct(self.config, True)
+                else:
+                    _LOG.warning("Could not extract 'dt' from environment. Falling back to config value.")
+                    
             agent = ActSafe(
                 self.env.observation_space,
                 self.env.action_space,
