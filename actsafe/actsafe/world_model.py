@@ -229,6 +229,8 @@ class WorldModel(eqx.Module):
         _, (actions, trajectory, ensemble_trajectories, priors) = jax.lax.scan(
             f, initial_state, inputs
         )
+        # Swap time and batch axes for actions and state trajectory
+        actions, trajectory = _ensemble_first((actions, trajectory))
         # vmap twice: once for the ensemble, and second time for the horizon
         out = nest_vmap(self.reward_cost_decoder, 2)(ensemble_trajectories.flatten())
         # Ensemble axis before time axis.

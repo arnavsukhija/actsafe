@@ -30,6 +30,9 @@ class Writer(Protocol):
     ):
         ...
 
+    def close(self):
+        ...
+
 
 class TrainingLogger:
     def __init__(self, config: DictConfig) -> None:
@@ -61,6 +64,10 @@ class TrainingLogger:
         for writer in self._writers:
             writer.log_video(images, step, name, fps)
 
+    def close(self):
+        for writer in self._writers:
+            writer.close()
+
 
 class StdErrWriter:
     def __init__(self, logger_name: str = _SUMMARY_DEFAULT):
@@ -82,6 +89,9 @@ class StdErrWriter:
     ):
         pass
 
+    def close(self):
+        pass
+
 
 class JsonlWriter:
     def __init__(self, log_dir: str) -> None:
@@ -98,6 +108,9 @@ class JsonlWriter:
         name: str = "policy",
         fps: int | float = 30,
     ):
+        pass
+
+    def close(self):
         pass
 
 
@@ -122,6 +135,9 @@ class TensorboardXWriter:
         self._writer.add_video(name, np.array(images, copy=False), step, fps=fps)
         if flush:
             self._writer.flush()
+
+    def close(self):
+        self._writer.close()
 
 
 class WeightAndBiasesWriter:
@@ -158,6 +174,9 @@ class WeightAndBiasesWriter:
             },
             step=step,
         )
+
+    def close(self):
+        self._handle.finish()
 
 
 class StateWriter:
