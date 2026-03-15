@@ -43,8 +43,28 @@ class EpochSummary:
                     all_vids.append(trajectory.frames)
         if len(all_vids) == 0:
             return None
-        vids = np.asarray(all_vids)[-1].transpose(1, 0, -1, 2, 3)
-        return vids
+        # all_vids[-1] is a list of frames, each frame is (N, H, W, 3)
+        # Convert to (T, N, H, W, 3)
+        vids = np.asarray(all_vids[-1]) 
+        T, N, H, W, C = vids.shape
+        
+        # Tile N environment videos into a grid
+        grid_size = int(np.ceil(np.sqrt(N)))
+        grid_h = grid_size
+        grid_w = (N + grid_size - 1) // grid_size
+        
+        # Pad with zeros if N < grid_h * grid_w
+        if N < grid_h * grid_w:
+            padding = np.zeros((T, grid_h * grid_w - N, H, W, C), dtype=vids.dtype)
+            vids = np.concatenate([vids, padding], axis=1)
+            
+        # Reshape and transpose to (T, grid_h*H, grid_w*W, C)
+        vids = vids.reshape(T, grid_h, grid_w, H, W, C)
+        vids = vids.transpose(0, 1, 3, 2, 4, 5)
+        vids = vids.reshape(T, grid_h * H, grid_w * W, C)
+        
+        # WandB expects (T, C, H, W)
+        return vids.transpose(0, 3, 1, 2)
 
     def extend(self, samples: List[Trajectory]) -> None:
         self._data.append(samples)

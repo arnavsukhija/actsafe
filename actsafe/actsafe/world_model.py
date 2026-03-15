@@ -348,8 +348,13 @@ def evaluate_model(
     y = observations[0, conditioning_length:]
     error = jnp.abs(y - y_hat) / 2.0 - 0.5
     normalize = lambda image: ((image + 0.5) * 255).astype(jnp.uint8)
-    out = jnp.stack([normalize(x) for x in [y, y_hat, error]])
-    return out
+    
+    # y, y_hat, error are all (T, H, W, 3)
+    # Tile them horizontally: (T, H, 3*W, 3)
+    out = jnp.concatenate([normalize(y), normalize(y_hat), normalize(error)], axis=2)
+    
+    # WandB expects (T, C, H, W)
+    return out.transpose(0, 3, 1, 2)
 
 
 def _ensemble_first(x):

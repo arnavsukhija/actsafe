@@ -123,8 +123,10 @@ class Trainer:
             self.agent,
         )
         assert logger is not None and state_writer is not None and agent is not None
-        for epoch in range(epoch, epochs or self.config.training.epochs):
-            _LOG.info(f"Training epoch #{epoch}")
+        target_epochs = epochs or self.config.training.epochs
+        _LOG.info(f"Starting training loop: from epoch {epoch} to {target_epochs}")
+        for epoch in range(epoch, target_epochs):
+            _LOG.info(f"--- Starting Training Epoch #{epoch} ---")
             summary, wall_time, steps = self._run_training_epoch(
                 self.config.training.episodes_per_epoch
             )
