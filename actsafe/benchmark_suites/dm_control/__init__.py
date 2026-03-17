@@ -47,7 +47,7 @@ def convert_dm_control_to_gym_space(dm_control_space):
     elif isinstance(dm_control_space, specs.Array):
         if isinstance(dm_control_space, specs.BoundedArray):
             raise ValueError("The order of the if-statements matters.")
-        bound = lambda dtype, val, alt: val if np.issubdtype(dtype, np.bool_) else alt
+        bound = lambda dtype, val, alt: val if np.issubdtype(dtype, np.bool) else alt
         return spaces.Box(
             low=bound(dm_control_space.dtype, 0.0, -float("inf")),
             high=bound(dm_control_space.dtype, 1.0, float("inf")),
