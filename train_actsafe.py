@@ -1,3 +1,7 @@
+import os
+os.environ['MUJOCO_GL'] = 'egl'
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
 import logging
 
 import hydra
@@ -8,7 +12,6 @@ from actsafe.common.mixed_precision import mixed_precision
 from actsafe.rl.trainer import get_state_path, load_state, should_resume, start_fresh
 
 _LOG = logging.getLogger(__name__)
-
 
 @hydra.main(version_base=None, config_path="actsafe/configs", config_name="config")
 def main(cfg):

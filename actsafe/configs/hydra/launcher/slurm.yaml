@@ -15,3 +15,4 @@ max_num_timeout: 100
 setup:
   - '#SBATCH --requeue'
   - 'export MUJOCO_GL=egl'
+  - 'export PYOPENGL_PLATFORM=egl'
