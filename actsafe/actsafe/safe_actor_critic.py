@@ -102,7 +102,7 @@ class SafeModelBasedActorCritic:
         key: jax.Array,
     ) -> dict[str, float]:
         results: SafeActorCriticStepResults = update_safe_actor_critic(
-            model.sample,
+            model,
             self.horizon,
             initial_states,
             self.actor,
@@ -282,11 +282,11 @@ def evaluate_actor(
 
 @eqx.filter_jit
 @apply_mixed_precision(
-    target_module_names=["critic", "safety_critic", "actor", "rollout_fn"],
+    target_module_names=["critic", "safety_critic", "actor", "model"],
     target_input_names=["initial_states"],
 )
 def update_safe_actor_critic(
-    rollout_fn: RolloutFn,
+    model: Model,
     horizon: int,
     initial_states: jax.Array,
     actor: ContinuousActor,
@@ -312,7 +312,7 @@ def update_safe_actor_critic(
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
 ) -> SafeActorCriticStepResults:
-    vmapped_rollout_fn = jax.vmap(rollout_fn, (None, 0, None, None))
+    vmapped_rollout_fn = jax.vmap(model.sample, (None, 0, None, None))
     actor_grads, new_penalty_state, evaluation, metrics = penalty_fn(
         lambda actor: evaluate_actor(
             actor,

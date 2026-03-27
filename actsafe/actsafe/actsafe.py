@@ -184,6 +184,11 @@ class ActSafe:
             initial_states = inferred_rssm_states.reshape(
                 -1, inferred_rssm_states.shape[-1]
             )
+            sample_size = min(128, initial_states.shape[0])
+            indices = jax.random.choice(
+                next(self.prng), initial_states.shape[0], (sample_size,), replace=False
+            )
+            initial_states = initial_states[indices]
             if self.should_explore():
                 if not self.config.agent.unsupervised:
                     outs = self.actor_critic.update(
