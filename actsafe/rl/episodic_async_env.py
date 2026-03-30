@@ -183,6 +183,13 @@ class EpisodicAsync:
 
 
 def _worker(ctor, conn, time_limit, action_repeat):
+    # CRITICAL FIX: Hide the GPU from the worker subprocesses!
+    # Otherwise, when cloudpickle unpickles the environment, it imports JAX in the
+    # child process, which grabs the GPU driver lock. When the parent process then
+    # tries to compile PTX to SASS, it blocks infinitely on the driver lock.
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
     try:
         env = TimeLimit(cloudpickle.loads(ctor)(), time_limit)
         if isinstance(env.action_space, Box):
