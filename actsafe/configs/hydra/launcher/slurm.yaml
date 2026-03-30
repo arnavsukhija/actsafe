@@ -16,4 +16,4 @@ setup:
   - '#SBATCH --requeue'
   - 'export MUJOCO_GL=egl'
   - 'export PYOPENGL_PLATFORM=egl'
-  - 'export JAX_COMPILATION_CACHE_DIR=/cluster/scratch/${USER}/.jax_cache'
+  - 'export JAX_COMPILATION_CACHE_DIR=/cluster/scratch/${oc.env:USER}/.jax_cache'
