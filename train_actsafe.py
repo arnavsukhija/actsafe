@@ -1,4 +1,7 @@
 import os
+import multiprocessing as mp
+mp.set_start_method("forkserver", force=True)
+
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['PYOPENGL_PLATFORM'] = 'egl'
 
