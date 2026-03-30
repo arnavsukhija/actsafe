@@ -59,8 +59,9 @@ class EpisodicAsync:
         self.num_envs = len(self.parents)
 
     def _make_worker(self):
-        parent, child = mp.Pipe()
-        process = mp.Process(
+        ctx = mp.get_context("spawn")
+        parent, child = ctx.Pipe()
+        process = ctx.Process(
             target=_worker,
             args=(self.env_fn, child, self.time_limit, self.action_repeat),
         )
