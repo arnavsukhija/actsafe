@@ -19,14 +19,17 @@ class ActionRepeat(Wrapper):
         total_cost = 0.0
         current_step = 0
         info = {"steps": 0}
+        intermediate_states = []
         while current_step < self.repeat and not done:
             obs, reward, terminal, truncated, info = self.env.step(action)
+            intermediate_states.append(obs)
             total_reward += reward
             total_cost += info.get("cost", 0.0)
             current_step += 1
             done = truncated or terminal
         info["steps"] = current_step
         info["cost"] = total_cost
+        info["intermediate_states"] = intermediate_states
         return obs, total_reward, terminal, truncated, info
 
 
@@ -158,10 +161,12 @@ class SwitchCostWrapper(Wrapper):
         total_cost = 0.0
         current_step = 0
         info = {"steps": 0}
+        intermediate_states = []
 
         obs = None
         while current_step < num_repetitions and not (done or truncated):
             obs, reward, done, truncated, step_info = self.env.step(u)
+            intermediate_states.append(obs)
             
             # apply simple discounting within the step
             total_reward += (self.discounting ** current_step) * reward
@@ -190,6 +195,7 @@ class SwitchCostWrapper(Wrapper):
         info['steps'] = current_step
         info['cost'] = total_cost
         info['dt'] = time_for_action 
+        info['intermediate_states'] = intermediate_states
         
         return augmented_obs, float(total_reward), done, truncated, info
 
