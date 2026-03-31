@@ -196,6 +196,13 @@ class DMCWrapper:
     def np_random(self):
         return self.env.task._random
 
+    @property
+    def dt(self):
+        return self.env.control_timestep()
+        
+    def control_timestep(self):
+        return self.env.control_timestep()
+
 
 class ActionCostWrapper:
     def __init__(self, env: Env, cost_multiplier: float = 0):
@@ -291,10 +298,18 @@ def make(cfg: DictConfig) -> EnvironmentFactory:
         if cfg.agent.get("continuous_time", {}).get("enabled", False):
             from actsafe.rl.wrappers import SwitchCostWrapper
             ct_cfg = cfg.agent.continuous_time
+            
+            dt = getattr(env, 'dt', None)
+            if dt is None:
+                dt = getattr(env, 'control_timestep', lambda: 0.01)()
+                
+            tmin = ct_cfg.get("min_time_factor", 1) * dt
+            tmax = ct_cfg.get("max_time_factor", 50) * dt
+            
             env = SwitchCostWrapper(
                 env, 
-                tmin=ct_cfg.get("t_min", 0.01), 
-                tmax=ct_cfg.get("t_max", 0.5),
+                t_min=tmin, 
+                t_max=tmax,
                 discounting=cfg.agent.discount
             )
             

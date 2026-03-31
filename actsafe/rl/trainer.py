@@ -93,13 +93,18 @@ class Trainer:
         if self.config.agent.name == "actsafe":
             if self.config.agent.get("continuous_time", {}).get("enabled", False):
                 dt_vals = self.env.get_attr("dt")
+                OmegaConf.set_struct(self.config, False)
                 if dt_vals and dt_vals[0] is not None:
                     _LOG.info(f"Dynamically extracted base_dt={dt_vals[0]} from environment.")
-                    OmegaConf.set_struct(self.config, False)
-                    self.config.agent.continuous_time.base_dt = float(dt_vals[0])
-                    OmegaConf.set_struct(self.config, True)
+                    base_dt = float(dt_vals[0])
+                    self.config.agent.continuous_time.base_dt = base_dt
                 else:
                     _LOG.warning("Could not extract 'dt' from environment. Falling back to config value.")
+                    base_dt = self.config.agent.continuous_time.get("base_dt", 0.01)
+                    
+                self.config.agent.continuous_time.t_min = self.config.agent.continuous_time.get("min_time_factor", 1) * base_dt
+                self.config.agent.continuous_time.t_max = self.config.agent.continuous_time.get("max_time_factor", 50) * base_dt
+                OmegaConf.set_struct(self.config, True)
                     
             agent = ActSafe(
                 self.env.observation_space,

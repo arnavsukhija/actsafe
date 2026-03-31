@@ -101,21 +101,27 @@ class SwitchCostWrapper(Wrapper):
         self.tmin = t_min
         self.tmax = t_max
         self.discounting = discounting
-        self.dt = getattr(self.env.unwrapped, 'dt', 0.01)
-        if not hasattr(self.env.unwrapped, 'dt'):
-            self.dt = getattr(self.env.unwrapped, 'control_timestep', lambda: 0.01)()
+        self.dt = getattr(self.env, 'dt', None)
+        if self.dt is None:
+            self.dt = getattr(self.env, 'control_timestep', lambda: 0.01)()
         max_steps = getattr(self.env, '_max_episode_steps', 1000)
-        if hasattr(self.env.unwrapped, 'time_limit'):
-            max_steps = self.env.unwrapped.time_limit
+        if hasattr(self.env, 'time_limit'):
+            max_steps = self.env.time_limit
         self.time_horizon = max_steps * self.dt
         self.time_to_go = self.time_horizon        
         # Augment spaces
         obs_space = self.env.observation_space
         act_space = self.env.action_space
         if isinstance(obs_space, Box):
-            low = np.append(obs_space.low, 0.0)
-            high = np.append(obs_space.high, np.inf)
-            self.observation_space = Box(low=low, high=high, dtype=obs_space.dtype)
+            if len(obs_space.shape) == 1:
+                low = np.append(obs_space.low, 0.0)
+                high = np.append(obs_space.high, np.inf)
+                self.observation_space = Box(low=low, high=high, dtype=obs_space.dtype)
+            elif len(obs_space.shape) == 3:
+                low = np.concatenate([obs_space.low, np.zeros_like(obs_space.low[:1])], axis=0)
+                high = np.concatenate([obs_space.high, np.full_like(obs_space.high[:1], np.inf)], axis=0)
+                self.observation_space = Box(low=low, high=high, dtype=obs_space.dtype)
+            
         if isinstance(act_space, Box):
             low = np.append(act_space.low, -1.0)
             high = np.append(act_space.high, 1.0)
@@ -128,7 +134,11 @@ class SwitchCostWrapper(Wrapper):
         obs, info = self.env.reset(*args, **kwargs)
         self.time_to_go = self.time_horizon
         
-        state = np.concatenate([obs, np.array([self.time_to_go], dtype=obs.dtype)])
+        if len(obs.shape) == 1:
+            state = np.concatenate([obs, np.array([self.time_to_go], dtype=obs.dtype)])
+        else:
+            time_channel = np.full_like(obs[:1], self.time_to_go)
+            state = np.concatenate([obs, time_channel], axis=0)
         return state, info
 
     def compute_time(self,
@@ -190,7 +200,11 @@ class SwitchCostWrapper(Wrapper):
             truncated = True
             self.time_to_go = 0.0
             
-        augmented_obs = np.concatenate([obs, np.array([self.time_to_go], dtype=obs.dtype)])
+        if len(obs.shape) == 1:
+            augmented_obs = np.concatenate([obs, np.array([self.time_to_go], dtype=obs.dtype)])
+        else:
+            time_channel = np.full_like(obs[:1], self.time_to_go)
+            augmented_obs = np.concatenate([obs, time_channel], axis=0)
         
         info['steps'] = current_step
         info['cost'] = total_cost
