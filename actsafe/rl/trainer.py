@@ -189,10 +189,13 @@ class Trainer:
     def from_pickle(cls, config: DictConfig, state_path: str) -> "Trainer":
         with open(state_path, "rb") as f:
             make_env, seeds, agent, epoch, step = cloudpickle.load(f).values()
-        assert agent.config == config, "Loaded different hyperparameters."
+        if agent.config != config:
+            _LOG.warning("Loaded different hyperparameters from the saved state. Updating agent to use the new config.")
+            agent.config = config
+            
         _LOG.info(f"Resuming from step {step}")
         return cls(
-            config=agent.config,
+            config=config,
             make_env=make_env,
             start_epoch=epoch,
             seeds=seeds,
