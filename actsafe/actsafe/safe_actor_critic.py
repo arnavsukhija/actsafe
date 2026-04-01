@@ -230,7 +230,7 @@ def evaluate_actor(
         pseudo_time = actions[..., -1]
         
         time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
-        dt_ratio = jnp.floor(time_for_action / base_dt)
+        dt_ratio = jnp.maximum(jnp.round(time_for_action / base_dt), 1.0)
         
         # Compute per-step discounts: shape [batch_size, horizon]
         discount = base_discount ** dt_ratio
