@@ -151,7 +151,21 @@ class WeightAndBiasesWriter:
         config.wandb.name = name
         config_dict = omegaconf.OmegaConf.to_container(config, resolve=True)
         assert isinstance(config_dict, dict)
-        wandb.init(resume=True, config=config_dict, **config.wandb)
+        
+        wandb_kwargs = dict(config.wandb)
+        try:
+            wandb.init(resume="allow", config=config_dict, **wandb_kwargs)
+        except Exception as e:
+            # Check if this is a 409 Conflict/Deleted run error
+            if "Conflict" in str(e) or "deleted" in str(e):
+                logging.getLogger("wandb").warning(
+                    f"WandB run {wandb_kwargs.get('id')} was deleted or conflicted. Starting a new run instead."
+                )
+                # Remove the ID so WandB generates a new one
+                wandb_kwargs.pop("id", None)
+                wandb.init(resume=False, config=config_dict, **wandb_kwargs)
+            else:
+                raise e
         self._handle = wandb
 
     def log(self, summary: dict[str, float], step: int):
