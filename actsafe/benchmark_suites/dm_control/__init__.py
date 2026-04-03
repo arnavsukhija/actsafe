@@ -296,7 +296,7 @@ def make(cfg: DictConfig) -> EnvironmentFactory:
             env = CartpoleUnsupervisedWrapper(env)
             
         if cfg.agent.get("continuous_time", {}).get("enabled", False):
-            from actsafe.rl.wrappers import SwitchCostWrapper
+            from actsafe.rl.wrappers import SwitchCostWrapper, ConstantSwitchCost
             ct_cfg = cfg.agent.continuous_time
             
             dt = getattr(env, 'dt', None)
@@ -305,11 +305,13 @@ def make(cfg: DictConfig) -> EnvironmentFactory:
                 
             tmin = ct_cfg.get("min_time_factor", 1) * dt
             tmax = ct_cfg.get("max_time_factor", 50) * dt
+            switch_cost_val = ct_cfg.get("switch_cost", 1.0)
             
             env = SwitchCostWrapper(
                 env, 
                 t_min=tmin, 
                 t_max=tmax,
+                switch_cost=ConstantSwitchCost(switch_cost_val),
                 discounting=cfg.agent.discount
             )
             

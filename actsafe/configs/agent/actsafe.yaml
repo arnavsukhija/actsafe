@@ -46,7 +46,7 @@ continuous_time:
   enabled: false
   min_time_factor: 1
   max_time_factor: 50
-  base_dt: 0.01
+  switch_cost: 0.1
 plan_horizon: 15
 update_steps: 100
 train_every: 1000

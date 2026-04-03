@@ -5,7 +5,7 @@ defaults:
 
 training:
   action_repeat: 1  # Base simulation resolution
-  epochs: 100
+  epochs: 300
   safe: true
   safety_budget: 100
   
@@ -20,6 +20,7 @@ agent:
     enabled: true
     min_time_factor: 1
     max_time_factor: 50
+    switch_cost: 0.01
     # base_dt is dynamically inferred at runtime from the env
     
 environment:
