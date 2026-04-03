@@ -19,15 +19,19 @@ def make_actor_critic(
     objective_sentiment=bayes,
     constraint_sentiment=bayes,
 ):
-    # Account for the the discount factor in the budget.
-    episode_safety_budget = (
-        (
-            (cfg.training.safety_budget / cfg.training.time_limit)
-            / (1.0 - cfg.agent.safety_discount)
-        )
-        if cfg.agent.safety_discount < 1.0 - np.finfo(np.float32).eps
-        else cfg.training.safety_budget
-    ) + cfg.agent.safety_slack
+
+    continuous_time_enabled = cfg.agent.get("continuous_time", {}).get("enabled", False)
+    if cfg.agent.safety_discount < 1.0 - np.finfo(np.float32).eps:
+        if continuous_time_enabled:
+            # safety_budget is the total episode cost limit; convert to discounted value
+            episode_safety_budget = cfg.training.safety_budget / (1.0 - cfg.agent.safety_discount)
+        else:
+            episode_safety_budget = (
+                cfg.training.safety_budget / cfg.training.time_limit
+            ) / (1.0 - cfg.agent.safety_discount)
+    else:
+        episode_safety_budget = cfg.training.safety_budget
+    episode_safety_budget += cfg.agent.safety_slack
     _LOG.info(f"Episode safety budget: {episode_safety_budget}")
     if safe:
         if cfg.agent.penalizer.name == "lbsgd":

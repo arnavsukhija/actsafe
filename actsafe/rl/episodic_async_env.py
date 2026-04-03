@@ -196,7 +196,18 @@ def _worker(ctor, conn, time_limit, action_repeat):
             env = RescaleAction(env, -1.0, 1.0)  # type: ignore
             env.action_space = Box(-1.0, 1.0, env.action_space.shape, np.float32)
             env = ClipAction(env)  # type: ignore
-        env = wrappers.ActionRepeat(env, action_repeat)  # type: ignore
+        # SwitchCostWrapper already handles variable multi-step repetition internally.
+        # Applying ActionRepeat on top would double-repeat and break the time accounting.
+        # Detect by class name to avoid a circular import.
+        def _is_ct_env(e):
+            current = e
+            while hasattr(current, "env"):
+                if type(current).__name__ == "SwitchCostWrapper":
+                    return True
+                current = current.env
+            return type(current).__name__ == "SwitchCostWrapper"
+        if not _is_ct_env(env):
+            env = wrappers.ActionRepeat(env, action_repeat)  # type: ignore
         while True:
             try:
                 # Only block for short times to have keyboard exceptions be raised.
