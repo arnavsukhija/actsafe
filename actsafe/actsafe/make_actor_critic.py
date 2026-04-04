@@ -22,13 +22,11 @@ def make_actor_critic(
 
     continuous_time_enabled = cfg.agent.get("continuous_time", {}).get("enabled", False)
     if cfg.agent.safety_discount < 1.0 - np.finfo(np.float32).eps:
-        if continuous_time_enabled:
-            # safety_budget is the total episode cost limit; convert to discounted value
-            episode_safety_budget = cfg.training.safety_budget / (1.0 - cfg.agent.safety_discount)
-        else:
-            episode_safety_budget = (
-                cfg.training.safety_budget / cfg.training.time_limit
-            ) / (1.0 - cfg.agent.safety_discount)
+        # safety_budget is the total episode cost limit; convert to discounted value by
+        # dividing by time_limit (getting per-step budget) and then the geometric series factor.
+        episode_safety_budget = (
+            cfg.training.safety_budget / cfg.training.time_limit
+        ) / (1.0 - cfg.agent.safety_discount)
     else:
         episode_safety_budget = cfg.training.safety_budget
     episode_safety_budget += cfg.agent.safety_slack
