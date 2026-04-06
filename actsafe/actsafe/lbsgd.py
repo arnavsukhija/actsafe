@@ -41,19 +41,17 @@ def lbsgd_update(
     m_1: float,
     base_lr: float,
     backup_lr: float,
-) -> tuple[PyTree, LBSGDState, tuple[float, ...]]:
+) -> tuple[PyTree, LBSGDState, tuple[float, ...], float]:
     def happy_case():
         lr, (lhs, rhs) = compute_lr(alpha_1, g, grad_f_1, m_0, m_1, eta_t)
         new_eta = eta_t / eta_rate
-        updates = jax.tree_map(lambda x: x * lr / base_lr, g)
-        return updates, LBSGDState(new_eta), (lr, lhs, rhs)
+        # Return the unscaled gradient, and the scale factor separately 
+        # so Adam is applied first, then scaled downstream.
+        return g, LBSGDState(new_eta), (lr, lhs, rhs), (lr / base_lr)
 
     def fallback():
-        # Taking the negative gradient of the constraints to minimize the costs.
-        # Normalize by base_lr so backup_lr is the actual step size.
-        updates = jax.tree_map(lambda x: x * (backup_lr / base_lr), grad_f_1)
         new_eta = eta_t / eta_rate
-        return updates, LBSGDState(new_eta), (0.0, 0.0, 0.0)
+        return grad_f_1, LBSGDState(new_eta), (0.0, 0.0, 0.0), (backup_lr / base_lr)
 
     g, grad_f_1, alpha_1 = updates
     eta_t = state.eta
@@ -107,7 +105,7 @@ class LBSGDPenalizer:
         jacobian, rest = jacrev(evaluate_helper, has_aux=True)(actor)
         g, grad_f_1 = pytrees_unstack(jacobian)
         alpha = rest.constraint
-        updates, state, (lr, lhs, rhs) = lbsgd_update(
+        updates, state, (lr, lhs, rhs), step_scale = lbsgd_update(
             state,
             apply_dtype((g, grad_f_1, alpha), jnp.float32),
             self.eta_rate,
@@ -121,5 +119,6 @@ class LBSGDPenalizer:
             "agent/lbsgd/lr": jnp.asarray(lr),
             "agent/lbsgd/lhs": jnp.asarray(lhs),
             "agent/lbsgd/rhs": jnp.asarray(rhs),
+            "agent/lbsgd/step_scale": jnp.asarray(step_scale),
         }
         return updates, state, rest, metrics

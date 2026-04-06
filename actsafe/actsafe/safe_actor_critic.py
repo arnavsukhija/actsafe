@@ -336,8 +336,9 @@ def update_safe_actor_critic(
         penalty_state,
         actor,
     )
+    step_scale = metrics.get("agent/lbsgd/step_scale", jnp.array(1.0))
     new_actor, new_actor_state = actor_learner.grad_step(
-        actor, actor_grads, actor_learning_state
+        actor, actor_grads, actor_learning_state, step_scale
     )
     critics_grads_fn = eqx.filter_value_and_grad(critic_loss_fn)
     critic_loss, grads = critics_grads_fn(

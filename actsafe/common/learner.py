@@ -25,11 +25,13 @@ class Learner:
         self.state = init_fn(eqx.filter(model, eqx.is_array))
 
     def grad_step(
-        self, model: PyTree, grads: PyTree, state: optax.OptState
+        self, model: PyTree, grads: PyTree, state: optax.OptState, step_scale: float = 1.0
     ) -> tuple[PyTree, optax.OptState]:
         # TODO (anon): should retain the policy and use params dtype
         grads = apply_dtype(grads, jnp.float32)
         updates, new_opt_state = self.optimizer.update(grads, state)
+        if step_scale is not None:
+             updates = jax.tree_map(lambda x: x * step_scale, updates)
         all_ok = all_finite(updates)
         updates = update_if(
             all_ok, updates, jax.tree_map(lambda x: jnp.zeros_like(x), updates)
