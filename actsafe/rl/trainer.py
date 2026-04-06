@@ -155,7 +155,8 @@ class Trainer:
             for k, v in report.videos.items():
                 logger.log_video(v, self.step, k)
             self.epoch = epoch + 1
-            state_writer.write(self.state)
+            if self.epoch % self.config.training.checkpoint_every == 0:
+                state_writer.write(self.state)
 
     def _run_training_epoch(
         self,

@@ -53,6 +53,57 @@ class ReplayBuffer:
         self.batch_size = batch_size
         self.sequence_length = sequence_length
 
+    def __getstate__(self):
+        """Prepare the buffer for pickling by only saving used episodes."""
+        state = self.__dict__.copy()
+        # Save the full capacity information so we can reconstruct upon load
+        state["full_capacity"] = self.observation.shape[0]
+        state["max_episode_length"] = self.observation.shape[1] - 1
+        
+        # Only save valid data to drastically reduce pickle size early in training.
+        # This prevents saving 16GB of zeros to disk.
+        valid = self._valid_episodes
+        state["observation"] = self.observation[:valid + 1]
+        state["action"] = self.action[:valid]
+        state["reward"] = self.reward[:valid]
+        state["cost"] = self.cost[:valid]
+        return state
+
+    def __setstate__(self, state):
+        """Restore the buffer, re-allocating zeros for the unused capacity."""
+        if "full_capacity" not in state:
+            self.__dict__.update(state)
+            return
+
+        # Extract full capacity and max length from the pickled state
+        capacity = state.pop("full_capacity")
+        max_length = state.pop("max_episode_length")
+        
+        # Load the dictionary first to initialize other fields
+        self.__dict__.update(state)
+        
+        # Now re-allocate the full-size zero-filled arrays
+        obs_shape = self.observation.shape[2:]
+        act_shape = self.action.shape[2:]
+        num_rewards = self.reward.shape[2]
+        
+        full_observation = np.zeros((capacity, max_length + 1) + obs_shape, dtype=self.obs_dtype)
+        full_action = np.zeros((capacity, max_length) + act_shape, dtype=self.dtype)
+        full_reward = np.zeros((capacity, max_length, num_rewards), dtype=self.dtype)
+        full_cost = np.zeros((capacity, max_length), dtype=self.dtype)
+        
+        # Copy the pickled data back into the beginning...
+        valid = self._valid_episodes
+        full_observation[:valid + 1] = self.observation
+        full_action[:valid] = self.action
+        full_reward[:valid] = self.reward
+        full_cost[:valid] = self.cost
+        
+        self.observation = full_observation
+        self.action = full_action
+        self.reward = full_reward
+        self.cost = full_cost
+
     def add(self, trajectory: TrajectoryData):
         capacity, *_ = self.reward.shape
         batch_size = min(trajectory.observation.shape[0], capacity)
