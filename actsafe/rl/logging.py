@@ -143,6 +143,8 @@ class TensorboardXWriter:
 class WeightAndBiasesWriter:
     def __init__(self, config: DictConfig):
         import wandb
+        import queue
+        from threading import Thread
 
         try:
             name = config.wandb.name
@@ -187,8 +189,31 @@ class WeightAndBiasesWriter:
                 raise e
         self._handle = wandb
 
+        self.q = queue.Queue(maxsize=50)
+        self.worker = Thread(name="wandb_async_writer", target=self._upload_thread, daemon=True)
+        self.worker.start()
+
+    def _upload_thread(self):
+        while True:
+            item = self.q.get()
+            if item is None:
+                break
+            try:
+                func, args, kwargs = item
+                func(*args, **kwargs)
+            except Exception as e:
+                logging.getLogger("wandb_async_writer").error(f"Error in wandb background thread: {e}")
+            finally:
+                self.q.task_done()
+
     def log(self, summary: dict[str, float], step: int):
-        self._handle.log(summary, step=step)
+        import queue
+        try:
+            self.q.put_nowait((self._handle.log, (summary,), {"step": step}))
+        except queue.Full:
+            logging.getLogger("wandb_async_writer").warning(
+                "WandB queue is full (network blocked?). Dropping metrics for step %d", step
+            )
 
     def log_video(
         self,
@@ -197,6 +222,15 @@ class WeightAndBiasesWriter:
         name: str = "policy",
         fps: int | float = 30,
     ):
+        import queue
+        try:
+            self.q.put_nowait((self._handle_log_video, (images, step, name, fps), {}))
+        except queue.Full:
+            logging.getLogger("wandb_async_writer").warning(
+                "WandB queue is full (network blocked?). Dropping video for step %d", step
+            )
+
+    def _handle_log_video(self, images, step, name, fps):
         self._handle.log(
             {
                 name: self._handle.Video(
@@ -209,6 +243,9 @@ class WeightAndBiasesWriter:
         )
 
     def close(self):
+        self.q.put(None)
+        if self.worker.is_alive():
+            self.worker.join()
         self._handle.finish()
 
 
