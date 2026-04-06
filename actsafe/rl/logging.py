@@ -153,8 +153,22 @@ class WeightAndBiasesWriter:
         assert isinstance(config_dict, dict)
         
         wandb_kwargs = dict(config.wandb)
+        
+        # Deadlock Guard: Disable system metrics and meta collection which can clash with JAX/GPU drivers.
+        # Also increase the initialization timeout to 300s for slow cluster networks.
+        wandb_settings = wandb.Settings(
+            _disable_stats=True, 
+            _disable_meta=True,
+            init_timeout=300
+        )
+        
         try:
-            wandb.init(resume="allow", config=config_dict, **wandb_kwargs)
+            wandb.init(
+                resume="allow", 
+                config=config_dict, 
+                settings=wandb_settings,
+                **wandb_kwargs
+            )
         except Exception as e:
             # Check if this is a 409 Conflict/Deleted run error
             if "Conflict" in str(e) or "deleted" in str(e):
@@ -163,7 +177,12 @@ class WeightAndBiasesWriter:
                 )
                 # Remove the ID so WandB generates a new one
                 wandb_kwargs.pop("id", None)
-                wandb.init(resume=False, config=config_dict, **wandb_kwargs)
+                wandb.init(
+                    resume=False, 
+                    config=config_dict, 
+                    settings=wandb_settings,
+                    **wandb_kwargs
+                )
             else:
                 raise e
         self._handle = wandb

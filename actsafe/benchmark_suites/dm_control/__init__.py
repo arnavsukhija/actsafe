@@ -299,9 +299,15 @@ def make(cfg: DictConfig) -> EnvironmentFactory:
             from actsafe.rl.wrappers import SwitchCostWrapper, ConstantSwitchCost
             ct_cfg = cfg.agent.continuous_time
             
-            dt = getattr(env, 'dt', None)
+            def _get_attr(e, name, default=None):
+                try:
+                    return e.get_wrapper_attr(name)
+                except (AttributeError, KeyError):
+                    return getattr(e, name, default)
+            
+            dt = _get_attr(env, 'dt')
             if dt is None:
-                dt = getattr(env, 'control_timestep', lambda: 0.01)()
+                dt = _get_attr(env, 'control_timestep', lambda: 0.01)()
                 
             tmin = ct_cfg.get("min_time_factor", 1) * dt
             tmax = ct_cfg.get("max_time_factor", 50) * dt

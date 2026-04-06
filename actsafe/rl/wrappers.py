@@ -101,12 +101,21 @@ class SwitchCostWrapper(Wrapper):
         self.tmin = t_min
         self.tmax = t_max
         self.discounting = discounting
-        self.dt = getattr(self.env, 'dt', None)
+        def _get_attr(e, name, default=None):
+            try:
+                return e.get_wrapper_attr(name)
+            except (AttributeError, KeyError):
+                return getattr(e, name, default)
+
+        self.dt = _get_attr(self.env, 'dt')
         if self.dt is None:
-            self.dt = getattr(self.env, 'control_timestep', lambda: 0.01)()
-        max_steps = getattr(self.env, '_max_episode_steps', 1000)
-        if hasattr(self.env, 'time_limit'):
-            max_steps = self.env.time_limit
+            self.dt = _get_attr(self.env, 'control_timestep', lambda: 0.01)()
+            
+        max_steps = _get_attr(self.env, '_max_episode_steps', 1000)
+        time_limit = _get_attr(self.env, 'time_limit')
+        if time_limit is not None:
+            max_steps = time_limit
+            
         self.time_horizon = max_steps * self.dt
         self.time_to_go = self.time_horizon        
         # Augment spaces

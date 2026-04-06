@@ -88,6 +88,10 @@ class EpisodicAsync:
         payloads = []
         parents = parents or self.parents
         for parent in parents:
+            # Deadlock Guard: Don't wait forever if a worker hangs.
+            # 120 seconds is plenty for even a slow DM Control step.
+            if not parent.poll(timeout=120.0):
+                raise RuntimeError("Environment worker timed out! (Communication hang)")
             try:
                 message, payload = parent.recv()
             except ConnectionResetError:
