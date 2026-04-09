@@ -161,7 +161,7 @@ class WeightAndBiasesWriter:
         wandb_settings = wandb.Settings(
             _disable_stats=True, 
             _disable_meta=True,
-            init_timeout=300
+            init_timeout=3600
         )
         
         try:

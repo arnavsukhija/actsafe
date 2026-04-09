@@ -13,14 +13,16 @@ training:
 agent:
   exploration_strategy: opax
   exploration_steps: 1000000
+  actor:
+    init_stddev: 0.025
   sentiment:
-    constraint_pessimism: 50.0
+    constraint_pessimism: 5.0
   penalizer:
     backup_lr: 8e-5
   continuous_time:
     enabled: true
     min_time_factor: 1
-    max_time_factor: 2
+    max_time_factor: 8
     switch_cost: 0.001
     # base_dt is dynamically inferred at runtime from the env
     
