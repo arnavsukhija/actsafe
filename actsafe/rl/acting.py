@@ -23,47 +23,75 @@ def interact(
     step: int,
     render_episodes: int = 0,
 ) -> tuple[list[Trajectory], int]:
-    observations = environment.reset()
     episode_count = 0
     episodes: list[Trajectory] = []
-    trajectory = Trajectory()
+    
     with tqdm(
         total=num_episodes,
-        unit=f"Episode (✕ {environment.num_envs} parallel)",
+        unit=f"Batch (✕ {environment.num_envs} envs)",
     ) as pbar:
         while episode_count < num_episodes:
-            render = render_episodes > 0
-            if render:
-                trajectory.frames.append(environment.render())
-            actions = agent(observations, train)
-            next_observations, rewards, done, infos = environment.step(actions)
-            costs = np.array([info.get("cost", 0) for info in infos])
-            transition = Transition(
-                observations, next_observations, actions, rewards, costs
-            )
-            trajectory.transitions.append(transition)
-            agent.observe_transition(transition)
-            observations = next_observations
-            if done.any():
-                assert (
-                    done.all()
-                ), "No support for environments with different ending conditions"
+            observations = environment.reset()
+            active_mask = np.ones(environment.num_envs, dtype=bool)
+            per_env_trajectories = [Trajectory() for _ in range(environment.num_envs)]
+            
+            while active_mask.any(): # with a continuous setup, it can happen that some envs are done before others -> TAKE THIS INTO ACCOUNT
+                render = render_episodes > 0
+                if render:
+                    # Rendering is only supported for the first few envs anyway in EpisodicAsync
+                    frame = environment.render()
+                    for i in range(min(len(frame), environment.num_envs)):
+                        if active_mask[i]:
+                            per_env_trajectories[i].frames.append(frame[i])
+                
+                actions = agent(observations, train)
+                next_observations, rewards, done, infos = environment.step(actions)
+                
+                for i in range(environment.num_envs):
+                    if not active_mask[i]:
+                        continue
+                    
+                    # Create single-batch transition
+                    cost = infos[i].get("cost", 0)
+                    transition = Transition(
+                        observations[i:i+1], 
+                        next_observations[i:i+1], 
+                        actions[i:i+1], 
+                        np.array([rewards[i]]), 
+                        np.array([cost])
+                    )
+                    per_env_trajectories[i].transitions.append(transition)
+                
+                observations = next_observations
+                active_mask &= ~done
+
+            # Batch complete. Process all trajectories.
+            for i in range(environment.num_envs):
+                trajectory = per_env_trajectories[i]
                 np_trajectory = trajectory.as_numpy()
+                
+                # Update total steps based on actual transitions taken
                 step += (
                     int(np.prod(np_trajectory.cost.shape))
                     * environment.action_repeat
                 )
+                
                 if train:
                     agent.observe(np_trajectory)
+                
                 reward, cost = _summarize_episodes(np_trajectory)
                 pbar.set_postfix({"reward": reward, "cost": cost})
-                if render:
-                    render_episodes = max(render_episodes - 1, 0)
+                
+                if render_episodes > 0:
+                    render_episodes -= 1
+                    
                 episodes.append(trajectory)
-                trajectory = Trajectory()
                 pbar.update(1)
                 episode_count += 1
-                observations = environment.reset()
+                
+                if episode_count >= num_episodes:
+                    break
+                    
     return episodes, step
 
 

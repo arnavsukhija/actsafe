@@ -188,9 +188,7 @@ class EpisodicAsync:
 
 def _worker(ctor, conn, time_limit, action_repeat):
     import faulthandler
-    import os
     faulthandler.enable()
-    os.environ["CUDA_VISIBLE_DEVICES"] = "cpu"
     try:
         env = TimeLimit(cloudpickle.loads(ctor)(), time_limit)
         if isinstance(env.action_space, Box):
