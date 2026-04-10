@@ -21,3 +21,4 @@ setup:
   - export XLA_PYTHON_CLIENT_MEM_FRACTION=0.7
   - 'export WANDB_INIT_TIMEOUT=3600'
   - 'export WANDB_START_METHOD=thread'
+  - 'export WANDB_MODE=offline'
