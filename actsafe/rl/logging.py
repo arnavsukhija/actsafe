@@ -155,12 +155,7 @@ class WeightAndBiasesWriter:
         assert isinstance(config_dict, dict)
         
         wandb_kwargs = dict(config.wandb)
-        
-        # Deadlock Guard: Disable system metrics and meta collection which can clash with JAX/GPU drivers.
-        # Also increase the initialization timeout to 300s for slow cluster networks.
         wandb_settings = wandb.Settings(
-            _disable_stats=True, 
-            _disable_meta=True,
             init_timeout=3600
         )
         
