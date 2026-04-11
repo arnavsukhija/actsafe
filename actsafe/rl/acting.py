@@ -47,6 +47,15 @@ def interact(
                 actions = agent(observations, train)
                 next_observations, rewards, done, infos = environment.step(actions)
                 
+                # Count the actual base simulation steps consumed this agent call.
+                # info['steps'] is written by SwitchCostWrapper (= num_repetitions).
+                # For plain discrete envs it falls back to action_repeat
+                sim_steps_this_call = sum(
+                    infos[i].get("steps", environment.action_repeat)
+                    for i in range(environment.num_envs)
+                    if active_mask[i]
+                )
+                
                 for i in range(environment.num_envs):
                     if not active_mask[i]:
                         continue
@@ -62,6 +71,9 @@ def interact(
                     )
                     per_env_trajectories[i].transitions.append(transition)
                 
+                # Tick training schedule counters with actual sim steps.
+                agent.observe_transition(transition, sim_steps=sim_steps_this_call)
+                
                 observations = next_observations
                 active_mask &= ~done
 
@@ -70,7 +82,12 @@ def interact(
                 trajectory = per_env_trajectories[i]
                 np_trajectory = trajectory.as_numpy()
                 
-                # Update total steps based on actual transitions taken
+                # step counter: sum of actual sim steps across all transitions.
+                # For discrete envs each transition = action_repeat sim steps.
+                # For continuous envs each transition = num_repetitions sim steps.
+                # We approximate as len * action_repeat here (outer counter for
+                # logging); the precise count drives the training schedule via
+                # observe_transition above.
                 step += (
                     int(np.prod(np_trajectory.cost.shape))
                     * environment.action_repeat

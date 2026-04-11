@@ -103,25 +103,19 @@ class ActSafe:
         self.state = AgentState.init(
             config.training.parallel_envs, self.model.cell, action_dim
         )
-        environment_steps_per_agent_step = (
-            config.training.parallel_envs * config.training.action_repeat
-        )
-        self.should_train = Count(
-            config.agent.train_every,
-            environment_steps_per_agent_step,
-        )
-        self.should_explore = Until(
-            config.agent.exploration_steps, environment_steps_per_agent_step
-        )
-        self.should_collect_offline = Until(
-            config.agent.offline_steps, environment_steps_per_agent_step
-        )
+        # Counters tick by actual sim steps (passed via observe_transition),
+        # so steps=1 here; the threshold values (exploration_steps, offline_steps)
+        # are in units of base simulation steps, consistent across discrete and
+        # continuous time.
+        self.should_train = Count(config.agent.train_every, steps=1)
+        self.should_explore = Until(config.agent.exploration_steps, steps=1)
+        self.should_collect_offline = Until(config.agent.offline_steps, steps=1)
         learn_model_steps = (
             config.agent.learn_model_steps
             if config.agent.learn_model_steps is not None
             else float("inf")
         )
-        self.learn_model = Until(learn_model_steps, environment_steps_per_agent_step)
+        self.learn_model = Until(learn_model_steps, steps=1)
         self.metrics_monitor = MetricsMonitor()
         self.zero_shot = False
 
@@ -140,9 +134,7 @@ class ActSafe:
                 if self.should_explore()
                 else self.actor_critic.actor.act
             )
-        self.should_explore.tick()
-        self.should_collect_offline.tick()
-        self.learn_model.tick()
+        # Counters are ticked in observe_transition() with actual sim steps.
         actions, self.state = policy(
             policy_fn,
             self.model,
@@ -160,8 +152,19 @@ class ActSafe:
         )
         self.state = jax.tree_map(lambda x: jnp.zeros_like(x), self.state)
 
-    def observe_transition(self, transition: Transition) -> None:
-        pass
+    def observe_transition(self, transition: Transition, *, sim_steps: int = 0) -> None:
+        # Advance all training schedule counters by the actual number of base
+        # simulation steps consumed for this transition.  In discrete mode,
+        # sim_steps == action_repeat (usually 1).  In continuous-time mode it is
+        # the num_repetitions value from SwitchCostWrapper, which may be 1-max_time_repeat×.
+        # This ensures exploration_steps / offline_steps thresholds mean the
+        # same amount of simulated time regardless of control frequency.
+        if sim_steps > 0:
+            self.should_explore.count += sim_steps
+            self.should_collect_offline.count += sim_steps
+            self.learn_model.count += sim_steps
+            # should_train uses a modular Count; advance it manually.
+            self.should_train.count = (self.should_train.count + sim_steps) % self.should_train.n
 
     def update(self):
         total_steps = self.config.agent.update_steps

@@ -39,7 +39,7 @@ class Agent(Protocol):
     def observe(self, trajectory: TrajectoryData) -> None:
         ...
 
-    def observe_transition(self, transition: Transition) -> None:
+    def observe_transition(self, transition: Transition, *, sim_steps: int = 0) -> None:
         ...
 
     def report(self, summary: EpochSummary, epoch: int, step: int) -> Report:

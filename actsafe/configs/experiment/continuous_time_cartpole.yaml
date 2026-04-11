@@ -17,6 +17,8 @@ agent:
     init_stddev: 0.025
   sentiment:
     constraint_pessimism: 5.0
+  replay_buffer:
+    sequence_length: 16  # Must be < min episode length for continuous time
   penalizer:
     backup_lr: 8e-5
   continuous_time:
