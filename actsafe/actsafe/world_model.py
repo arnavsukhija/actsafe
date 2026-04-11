@@ -122,6 +122,7 @@ class WorldModel(eqx.Module):
         ensemble_size: int,
         initialization_scale: float,
         num_rewards: int,
+        continuous_time: bool = False,
         *,
         key,
     ):
@@ -131,6 +132,13 @@ class WorldModel(eqx.Module):
             image_decoder_key,
             reward_cost_decoder_key,
         ) = jax.random.split(key, 4)
+        # In continuous-time mode, SwitchCostWrapper appends a time_to_go channel
+        # as the last channel of the observation.  Time carries no spatial image
+        # structure and must NOT be encoded by the CNN or reconstructed by the
+        # Strip it here so Encoder and ImageDecoder only see the C real image channels.
+        self.continuous_time = continuous_time
+        image_channels = image_shape[0] - 1 if continuous_time else image_shape[0]
+        actual_image_shape = (image_channels,) + image_shape[1:]
         self.cell = RSSM(
             deterministic_size,
             stochastic_size,
@@ -141,9 +149,9 @@ class WorldModel(eqx.Module):
             initialization_scale,
             key=cell_key,
         )
-        self.encoder = Encoder(image_channels=image_shape[0], key=encoder_key)
+        self.encoder = Encoder(image_channels=image_channels, key=encoder_key)
         state_dim = stochastic_size + deterministic_size
-        self.image_decoder = ImageDecoder(state_dim, image_shape, key=image_decoder_key)
+        self.image_decoder = ImageDecoder(state_dim, actual_image_shape, key=image_decoder_key)
         # num_rewards + 1 = cost + reward
         # width = 400, layers = 2
         self.reward_cost_decoder = eqx.nn.MLP(
@@ -162,7 +170,12 @@ class WorldModel(eqx.Module):
         key: jax.Array,
         init_state: State | None = None,
     ) -> InferenceResult:
-        obs_embeddings = jax.vmap(self.encoder)(features.observation)
+        # Strip the time_to_go channel (last channel) added by SwitchCostWrapper.
+        # Time encodes remaining episode horizon as a scalar broadcast to a full
+        # image channel — it has no spatial structure and should not be encoded
+        # by the CNN or reconstructed by the image decoder.
+        obs = features.observation[:, :-1] if self.continuous_time else features.observation
+        obs_embeddings = jax.vmap(self.encoder)(obs)
 
         def fn(carry, inputs):
             prev_state = carry
@@ -189,7 +202,9 @@ class WorldModel(eqx.Module):
         action: jax.Array,
         key: jax.Array,
     ) -> State:
-        obs_embeddings = self.encoder(observation)
+        # Strip the time_to_go channel before encoding (same as in __call__).
+        obs = observation[:-1] if self.continuous_time else observation
+        obs_embeddings = self.encoder(obs)
         state, *_ = self.cell.filter(state, obs_embeddings, action, key)
         return state
 
@@ -287,7 +302,10 @@ def variational_step(
             reward_cost,
             jnp.concatenate([reward, features.cost[..., None]], -1),
         )
-        image_logprobs = logprobs(inference_result.image, features.observation)
+        # Strip the time_to_go channel from the reconstruction target so the
+        # image decoder is only trained to reconstruct real image pixels.
+        target_obs = features.observation[:, :, :-1] if model.continuous_time else features.observation
+        image_logprobs = logprobs(inference_result.image, target_obs)
         reconstruction_loss = -reward_cost_logprobs - image_logprobs
         kl_loss = kl_divergence(
             inference_result.posteriors, inference_result.priors, free_nats, kl_mix
@@ -345,6 +363,9 @@ def evaluate_model(
     prediction = marginalize_prediction(prediction)
     y_hat = jax.vmap(model.image_decoder)(prediction.next_state)
     y = observations[0, conditioning_length:]
+    # Strip time channel from ground-truth for comparison with decoded images.
+    if model.continuous_time:
+        y = y[:, :-1]
     error = jnp.abs(y - y_hat) / 2.0 - 0.5
     normalize = lambda image: ((image + 0.5) * 255).astype(jnp.uint8)
     
