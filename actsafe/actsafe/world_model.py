@@ -111,6 +111,7 @@ class WorldModel(eqx.Module):
     encoder: Encoder
     image_decoder: ImageDecoder
     reward_cost_decoder: eqx.nn.MLP
+    continuous_time: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -132,8 +133,6 @@ class WorldModel(eqx.Module):
             image_decoder_key,
             reward_cost_decoder_key,
         ) = jax.random.split(key, 4)
-        # In continuous-time mode, SwitchCostWrapper appends a time_to_go channel
-        # as the last channel of the observation.  Time carries no spatial image
         # structure and must NOT be encoded by the CNN or reconstructed by the
         # Strip it here so Encoder and ImageDecoder only see the C real image channels.
         self.continuous_time = continuous_time
