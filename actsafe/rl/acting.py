@@ -35,6 +35,7 @@ def interact(
             active_mask = np.ones(environment.num_envs, dtype=bool)
             per_env_trajectories = [Trajectory() for _ in range(environment.num_envs)]
             
+            batch_sim_steps = 0
             while active_mask.any(): # with a continuous setup, it can happen that some envs are done before others -> TAKE THIS INTO ACCOUNT
                 render = render_episodes > 0
                 if render:
@@ -49,12 +50,13 @@ def interact(
                 
                 # Count the actual base simulation steps consumed this agent call.
                 # info['steps'] is written by SwitchCostWrapper (= num_repetitions).
-                # For plain discrete envs it falls back to action_repeat
+                # For plain discrete envs it falls back to action_repeat.
                 sim_steps_this_call = sum(
                     infos[i].get("steps", environment.action_repeat)
                     for i in range(environment.num_envs)
                     if active_mask[i]
                 )
+                batch_sim_steps += sim_steps_this_call
                 
                 for i in range(environment.num_envs):
                     if not active_mask[i]:
@@ -77,21 +79,13 @@ def interact(
                 observations = next_observations
                 active_mask &= ~done
 
-            # Batch complete. Process all trajectories.
+            # Batch complete. Update global step counter with total sim steps from this batch.
+            step += batch_sim_steps
+
+            # Process all trajectories.
             for i in range(environment.num_envs):
                 trajectory = per_env_trajectories[i]
                 np_trajectory = trajectory.as_numpy()
-                
-                # step counter: sum of actual sim steps across all transitions.
-                # For discrete envs each transition = action_repeat sim steps.
-                # For continuous envs each transition = num_repetitions sim steps.
-                # We approximate as len * action_repeat here (outer counter for
-                # logging); the precise count drives the training schedule via
-                # observe_transition above.
-                step += (
-                    int(np.prod(np_trajectory.cost.shape))
-                    * environment.action_repeat
-                )
                 
                 if train:
                     agent.observe(np_trajectory)
