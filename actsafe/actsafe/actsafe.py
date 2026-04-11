@@ -19,7 +19,7 @@ from actsafe.rl.epoch_summary import EpochSummary
 from actsafe.rl.metrics import MetricsMonitor
 from actsafe.rl.trajectory import TrajectoryData, Transition
 from actsafe.rl.types import FloatArray, Report
-from actsafe.rl.utils import Count, PRNGSequence, Until, add_to_buffer
+from actsafe.rl.utils import PRNGSequence, Until, add_to_buffer
 
 
 @eqx.filter_jit
@@ -103,11 +103,13 @@ class ActSafe:
         self.state = AgentState.init(
             config.training.parallel_envs, self.model.cell, action_dim
         )
-        # Counters tick by actual sim steps (passed via observe_transition),
-        # so steps=1 here; the threshold values (exploration_steps, offline_steps)
-        # are in units of base simulation steps, consistent across discrete and
-        # continuous time.
-        self.should_train = Count(config.agent.train_every, steps=1)
+        # All training schedule counters are advanced in observe_transition()
+        # by the actual base simulation steps consumed per env step, so that
+        # every threshold (train_every, exploration_steps, offline_steps) means
+        # identical amounts of simulated time in both discrete and continuous
+        # control modes.
+        self._train_sim_steps = 0
+        self._train_every = config.agent.train_every
         self.should_explore = Until(config.agent.exploration_steps, steps=1)
         self.should_collect_offline = Until(config.agent.offline_steps, steps=1)
         learn_model_steps = (
@@ -124,7 +126,12 @@ class ActSafe:
         observation: FloatArray,
         train: bool = False,
     ) -> FloatArray:
-        if train and self.should_train() and not self.replay_buffer.empty:
+        # Fire a training update every _train_every accumulated sim steps.
+        # The remainder is carried forward so no sim steps are "lost" across calls.
+        should_train_now = self._train_sim_steps >= self._train_every
+        if should_train_now:
+            self._train_sim_steps -= self._train_every
+        if train and should_train_now and not self.replay_buffer.empty:
             self.update()
         if self.should_collect_offline():
             policy_fn = self.offline.get_policy()
@@ -154,17 +161,16 @@ class ActSafe:
 
     def observe_transition(self, transition: Transition, *, sim_steps: int = 0) -> None:
         # Advance all training schedule counters by the actual number of base
-        # simulation steps consumed for this transition.  In discrete mode,
-        # sim_steps == action_repeat (usually 1).  In continuous-time mode it is
-        # the num_repetitions value from SwitchCostWrapper, which may be 1-max_time_repeat×.
-        # This ensures exploration_steps / offline_steps thresholds mean the
-        # same amount of simulated time regardless of control frequency.
+        # simulation steps consumed for this transition.
+        # In discrete mode sim_steps == action_repeat × num_active_envs.
+        # In continuous-time mode it includes the num_repetitions from
+        # SwitchCostWrapper, making all thresholds mean the same simulated time
+        # regardless of control frequency.
         if sim_steps > 0:
+            self._train_sim_steps += sim_steps
             self.should_explore.count += sim_steps
             self.should_collect_offline.count += sim_steps
             self.learn_model.count += sim_steps
-            # should_train uses a modular Count; advance it manually.
-            self.should_train.count = (self.should_train.count + sim_steps) % self.should_train.n
 
     def update(self):
         total_steps = self.config.agent.update_steps
