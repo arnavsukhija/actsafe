@@ -230,7 +230,10 @@ def evaluate_actor(
         pseudo_time = actions[..., -1]
         
         time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
-        dt_ratio = jnp.maximum(jnp.round(time_for_action / base_dt), 1.0)
+        dt_raw = time_for_action / base_dt
+        # Straight-through estimator: round for the logic, but pass gradients through.
+        # This allows the actor to learn pseudo_time via backprop through the world model.
+        dt_ratio = dt_raw + jax.lax.stop_gradient(jnp.maximum(jnp.round(dt_raw), 1.0) - dt_raw)
         
         # Compute per-step discounts: shape [batch_size, horizon]
         discount = base_discount ** dt_ratio

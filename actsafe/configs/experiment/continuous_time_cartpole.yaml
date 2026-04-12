@@ -12,7 +12,7 @@ training:
   
 agent:
   exploration_strategy: opax
-  exploration_steps: 1000000
+  exploration_steps: 1250000
   model:
     continuous_time: true  # strip time_to_go obs channel from SwitchCostWrapper
   actor:
@@ -20,7 +20,7 @@ agent:
   sentiment:
     constraint_pessimism: 5.0
   replay_buffer:
-    sequence_length: 16  # Must be < min episode length for continuous time
+    sequence_length: 50
   penalizer:
     backup_lr: 8e-5
   continuous_time:
