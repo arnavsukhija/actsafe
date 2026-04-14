@@ -12,6 +12,10 @@ class EpochSummary:
     _data: list[list[Trajectory]] = field(default_factory=list)
     cost_boundary: float = 25.0
 
+    def __init__(self, cost_boundary: float = 25.0):
+        self._data = []
+        self.cost_boundary = cost_boundary
+
     @property
     def empty(self):
         return len(self._data) == 0

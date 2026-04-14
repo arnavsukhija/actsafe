@@ -178,6 +178,7 @@ class Trainer:
             True,
             self.step,
             self.config.training.render_episodes,
+            cost_boundary=self.config.training.safety_budget,
         )
         steps = step - self.step
         self.step = step
