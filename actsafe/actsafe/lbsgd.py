@@ -52,8 +52,7 @@ def lbsgd_update(
         # Taking the negative gradient of the constraints to minimize the costs.
         # Normalize by base_lr so backup_lr is the actual step size.
         updates = jax.tree_map(lambda x: x * (backup_lr / base_lr), grad_f_1)
-        new_eta = eta_t / eta_rate
-        return updates, LBSGDState(new_eta), (0.0, 0.0, 0.0)
+        return updates, LBSGDState(eta_t), (0.0, 0.0, 0.0)
 
     g, grad_f_1, alpha_1 = updates
     eta_t = state.eta
