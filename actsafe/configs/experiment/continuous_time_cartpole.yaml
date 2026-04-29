@@ -16,7 +16,7 @@ agent:
   model:
     continuous_time: true  # strip time_to_go obs channel from SwitchCostWrapper
   actor:
-    init_stddev: 0.025
+    init_stddev: 5.0
   sentiment:
     constraint_pessimism: 5.0
   replay_buffer:
