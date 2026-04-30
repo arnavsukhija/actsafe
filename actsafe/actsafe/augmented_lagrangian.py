@@ -82,4 +82,4 @@ class AugmentedLagrangianPenalizer:
             "agent/augmented_lagrangian/lagrangian": jnp.asarray(state.lagrangian),
             "agent/augmented_lagrangian/multiplier": jnp.asarray(state.multiplier),
         }
-        return grads, new_lagrangian_state, evaluation, metrics
+        return grads, new_lagrangian_state, evaluation, metrics, None

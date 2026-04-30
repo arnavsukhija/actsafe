@@ -39,7 +39,7 @@ class Penalizer(Protocol):
         evaluate: Callable[[ContinuousActor], ActorEvaluation],
         state: Any,
         actor: ContinuousActor,
-    ) -> tuple[PyTree, Any, ActorEvaluation, dict[str, jax.Array]]:
+    ) -> tuple[PyTree, Any, ActorEvaluation, dict[str, jax.Array], float | None]:
         ...
 
 
@@ -321,7 +321,7 @@ def update_safe_actor_critic(
     constraint_sentiment: Sentiment,
 ) -> SafeActorCriticStepResults:
     vmapped_rollout_fn = jax.vmap(model.sample, (None, 0, None, None))
-    actor_grads, new_penalty_state, evaluation, metrics = penalty_fn(
+    actor_grads, new_penalty_state, evaluation, metrics, step_scale = penalty_fn(
         lambda actor: evaluate_actor(
             actor,
             critic,
@@ -345,7 +345,7 @@ def update_safe_actor_critic(
         actor,
     )
     new_actor, new_actor_state = actor_learner.grad_step(
-        actor, actor_grads, actor_learning_state
+        actor, actor_grads, actor_learning_state, scale=step_scale
     )
     critics_grads_fn = eqx.filter_value_and_grad(critic_loss_fn)
     critic_loss, grads = critics_grads_fn(

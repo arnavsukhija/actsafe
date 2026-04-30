@@ -25,4 +25,4 @@ class DummyPenalizer:
 
         grads, evaluation = eqx.filter_grad(loss_fn, has_aux=True)(actor)
         metrics: dict[str, jax.Array] = dict()
-        return grads, None, evaluation, metrics
+        return grads, None, evaluation, metrics, None
