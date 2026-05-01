@@ -20,13 +20,13 @@ agent:
     init_stddev: 0.025
     initialization_scale: 0.01
   sentiment:
-    constraint_pessimism: 5.0
+    constraint_pessimism: 2.0
   replay_buffer:
     sequence_length: 50
   continuous_time:
     enabled: true
     min_time_factor: 1
-    max_time_factor: 4
+    max_time_factor: 8
     switch_cost: 0.001
     # base_dt is dynamically inferred at runtime from the env
     
