@@ -17,7 +17,7 @@ agent:
   model:
     continuous_time: true
   actor:
-    init_stddev: 0.025
+    init_stddev: 1.0
     initialization_scale: 0.01
   sentiment:
     constraint_pessimism: 2.0
@@ -28,6 +28,8 @@ agent:
     min_time_factor: 1
     max_time_factor: 8
     switch_cost: 0.001
+    target_physical_horizon: 30
+  plan_horizon: 30
     # base_dt is dynamically inferred at runtime from the env
     
 environment:
