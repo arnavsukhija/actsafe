@@ -10,6 +10,10 @@ class OpaxBridge(eqx.Module):
     model: WorldModel
     reward_scale: float = eqx.field(static=True)
     reward_epistemic_scale: float = eqx.field(static=True)
+    continuous_time: bool = eqx.field(static=True)
+    tmin: float | None = eqx.field(static=True)
+    tmax: float | None = eqx.field(static=True)
+    base_dt: float | None = eqx.field(static=True)
 
     def sample(
         self,
@@ -24,10 +28,17 @@ class OpaxBridge(eqx.Module):
         trajectory = Prediction(
             samples[0].action,
             samples[0].next_state,
-            samples[0].reward, # Assuming Prediction has a 'reward' field
+            samples[0].reward,
             samples[0].cost,
         )
         distributions = samples[1]
         return opax.modify_reward(
-            trajectory, distributions, self.reward_scale, self.reward_epistemic_scale
+            trajectory,
+            distributions,
+            self.reward_scale,
+            self.reward_epistemic_scale,
+            continuous_time=self.continuous_time,
+            tmin=self.tmin,
+            tmax=self.tmax,
+            base_dt=self.base_dt,
         )

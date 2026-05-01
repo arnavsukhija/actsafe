@@ -51,6 +51,11 @@ class OpaxExploration(Exploration):
         )
         self.reward_scale = config.agent.exploration_reward_scale
         self.epistemic_scale = config.agent.exploration_epistemic_scale
+        ct_cfg = config.agent.get("continuous_time", {})
+        self.continuous_time = ct_cfg.get("enabled", False)
+        self.tmin = ct_cfg.get("t_min", None) if self.continuous_time else None
+        self.tmax = ct_cfg.get("t_max", None) if self.continuous_time else None
+        self.base_dt = ct_cfg.get("base_dt", None) if self.continuous_time else None
 
     def update(
         self,
@@ -58,7 +63,15 @@ class OpaxExploration(Exploration):
         initial_states: jax.Array,
         key: jax.Array,
     ) -> dict[str, float]:
-        model = OpaxBridge(model, self.reward_scale, self.epistemic_scale)
+        model = OpaxBridge(
+            model,
+            self.reward_scale,
+            self.epistemic_scale,
+            continuous_time=self.continuous_time,
+            tmin=self.tmin,
+            tmax=self.tmax,
+            base_dt=self.base_dt,
+        )
         outs = self.actor_critic.update(model, initial_states, key)
         outs = {f"{_append_opax(k)}": v for k, v in outs.items()}
         return outs

@@ -11,15 +11,16 @@ training:
   checkpoint_every: 10
   
 agent:
-  offline_steps: 10000
+  offline_steps: 50000
   exploration_strategy: opax
   exploration_steps: 1000000
   model:
     continuous_time: true
   actor:
     init_stddev: 0.025
+    initialization_scale: 0.01
   sentiment:
-    constraint_pessimism: 2.0
+    constraint_pessimism: 5.0
   replay_buffer:
     sequence_length: 50
   continuous_time:

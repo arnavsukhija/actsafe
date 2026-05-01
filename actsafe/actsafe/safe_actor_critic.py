@@ -193,7 +193,7 @@ def critic_loss_fn(
     discount: jax.Array,
     horizon: int,
 ) -> jax.Array:
-    planning_discount = compute_discount(discount, horizon - 1)
+    planning_discount = eqx.filter_vmap(compute_discount)(discount, horizon - 1)
     values = nest_vmap(critic, 2)(trajectories)
     log_probs = trx.Independent(
         trx.Normal(lambda_values, jnp.ones_like(lambda_values)), 0
