@@ -159,7 +159,7 @@ class ActSafe:
         )
         self.state = jax.tree_map(lambda x: jnp.zeros_like(x), self.state)
 
-    def observe_transition(self, transition: Transition, *, sim_steps: int = 0) -> None:
+    def observe_transition(self, transition: Transition | None = None, *, sim_steps: int = 0) -> None:
         # Advance all training schedule counters by the actual number of base
         # simulation steps consumed for this transition.
         # In discrete mode sim_steps == action_repeat × num_active_envs.

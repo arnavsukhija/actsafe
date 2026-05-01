@@ -74,7 +74,9 @@ def interact(
                     per_env_trajectories[i].transitions.append(transition)
                 
                 # Tick training schedule counters with actual sim steps.
-                agent.observe_transition(transition, sim_steps=sim_steps_this_call)
+                # Note: observe_transition only uses sim_steps; the transition
+                # data itself is ignored (trajectories are ingested via observe()).
+                agent.observe_transition(sim_steps=sim_steps_this_call)
                 
                 observations = next_observations
                 active_mask &= ~done

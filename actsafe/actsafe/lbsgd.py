@@ -91,7 +91,7 @@ class LBSGDPenalizer:
         evaluate: Callable[[ContinuousActor], ActorEvaluation],
         state: Any,
         actor: ContinuousActor,
-    ) -> tuple[PyTree, Any, ActorEvaluation, dict[str, jax.Array]]:
+    ) -> tuple[PyTree, Any, ActorEvaluation, dict[str, jax.Array], float]:
         def evaluate_helper(actor):
             evaluation = evaluate(actor)
             loss = evaluation.loss - state.eta * jnp.log(
