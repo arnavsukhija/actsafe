@@ -19,7 +19,7 @@ agent:
   actor:
     init_stddev: 0.025
   sentiment:
-    constraint_pessimism: 5.0
+    constraint_pessimism: 2.0
   replay_buffer:
     sequence_length: 50
   continuous_time:
