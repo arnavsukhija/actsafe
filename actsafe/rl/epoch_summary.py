@@ -11,6 +11,10 @@ from actsafe.rl.trajectory import Trajectory
 class EpochSummary:
     _data: list[list[Trajectory]] = field(default_factory=list)
     cost_boundary: float = 25.0
+    continuous_time: bool = False
+    tmin: float = 0.0
+    tmax: float = 0.0
+    base_dt: float = 1.0
 
     @property
     def empty(self):
@@ -68,6 +72,46 @@ class EpochSummary:
 
     def extend(self, samples: List[Trajectory]) -> None:
         self._data.append(samples)
+
+    @property
+    def continuous_time_metrics(self) -> dict[str, float]:
+        """Compute diagnostic metrics for continuous-time control.
+
+        Returns dt_ratio and force statistics from actual environment actions.
+        These reveal whether the Opax time-normalization fix is working:
+        - If dt_ratio is always ~max, the agent is still exploiting the curiosity hack.
+        - If dt_ratio varies (especially values near 1-2), the fix is effective.
+        - If mean |force| is ~0, the agent is still frozen.
+        """
+        if not self.continuous_time or self.empty:
+            return {}
+
+        all_actions = []
+        for trajectory_batch in self._data:
+            for trajectory in trajectory_batch:
+                data = trajectory.as_numpy()
+                # action shape: [batch, time, action_dim]
+                all_actions.append(data.action)
+
+        actions = np.concatenate(all_actions, axis=0)  # [episodes, time, action_dim]
+        # Last dimension is pseudo_time, rest is physical force
+        pseudo_time = actions[..., -1]  # [episodes, time]
+        force = actions[..., :-1]  # [episodes, time, force_dim]
+
+        # Convert pseudo_time to dt_ratio using the same formula as the environment
+        time_for_action = ((self.tmax - self.tmin) / 2.0 * pseudo_time) + (self.tmax + self.tmin) / 2.0
+        dt_ratio = np.maximum(np.round(time_for_action / self.base_dt), 1.0)
+
+        return {
+            "train/ct/mean_dt_ratio": float(np.mean(dt_ratio)),
+            "train/ct/std_dt_ratio": float(np.std(dt_ratio)),
+            "train/ct/frac_dt_1": float(np.mean(dt_ratio == 1.0)),
+            "train/ct/frac_dt_max": float(np.mean(
+                dt_ratio == np.round(self.tmax / self.base_dt)
+            )),
+            "train/ct/mean_abs_force": float(np.mean(np.abs(force))),
+            "train/ct/std_force": float(np.std(force)),
+        }
 
 
 def _objective(rewards: npt.NDArray[Any]) -> float:

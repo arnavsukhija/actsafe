@@ -116,8 +116,18 @@ def epoch(
     step: int,
     render_episodes: int = 0,
     cost_boundary: float = 25.0,
+    continuous_time: bool = False,
+    tmin: float = 0.0,
+    tmax: float = 0.0,
+    base_dt: float = 1.0,
 ) -> tuple[EpochSummary, int]:
-    summary = EpochSummary(cost_boundary=cost_boundary)
+    summary = EpochSummary(
+        cost_boundary=cost_boundary,
+        continuous_time=continuous_time,
+        tmin=tmin,
+        tmax=tmax,
+        base_dt=base_dt,
+    )
     samples, step = interact(
         agent,
         env,

@@ -149,6 +149,7 @@ class Trainer:
             }
             report = agent.report(summary, epoch, self.step)
             report.metrics.update(metrics)
+            report.metrics.update(summary.continuous_time_metrics)
             if (maybe_videos := summary.videos) is not None:
                 report.videos.update({"train/video": maybe_videos})
             logger.log(report.metrics, self.step)
@@ -171,6 +172,8 @@ class Trainer:
         )
         start_time = time.time()
         env.reset(seed=int(next(seeds)[0].item()))
+        ct_cfg = self.config.agent.get("continuous_time", {})
+        ct_enabled = ct_cfg.get("enabled", False)
         summary, step = acting.epoch(
             agent,
             env,
@@ -179,6 +182,10 @@ class Trainer:
             self.step,
             self.config.training.render_episodes,
             cost_boundary=self.config.training.safety_budget,
+            continuous_time=ct_enabled,
+            tmin=float(ct_cfg.get("t_min", 0.0)) if ct_enabled else 0.0,
+            tmax=float(ct_cfg.get("t_max", 0.0)) if ct_enabled else 0.0,
+            base_dt=float(ct_cfg.get("base_dt", 1.0)) if ct_enabled else 1.0,
         )
         steps = step - self.step
         self.step = step
