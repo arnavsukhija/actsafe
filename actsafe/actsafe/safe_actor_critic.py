@@ -66,7 +66,6 @@ class SafeModelBasedActorCritic:
         penalizer: Penalizer,
         objective_sentiment: Sentiment,
         constraint_sentiment: Sentiment,
-        target_physical_horizon: float | None = None,
     ):
         actor_key, critic_key, safety_critic_key = jax.random.split(key, 3)
         self.actor = ContinuousActor(
@@ -95,7 +94,6 @@ class SafeModelBasedActorCritic:
         self.penalizer = penalizer
         self.objective_sentiment = objective_sentiment
         self.constraint_sentiment = constraint_sentiment
-        self.target_physical_horizon = target_physical_horizon
 
     def update(
         self,
@@ -129,7 +127,6 @@ class SafeModelBasedActorCritic:
             self.penalizer.state,
             self.objective_sentiment,
             self.constraint_sentiment,
-            self.target_physical_horizon,
         )
         self.actor = results.new_actor
         self.critic = results.new_critic
@@ -223,7 +220,6 @@ def evaluate_actor(
     base_dt: float | None,
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
-    target_physical_horizon: float | None = None,
 ) -> ActorEvaluation:
     trajectories, priors = rollout_fn(horizon, initial_states, key, actor.act)
     
@@ -247,31 +243,12 @@ def evaluate_actor(
         dt_ratio_nograd = jax.lax.stop_gradient(dt_ratio)
         discount = base_discount ** dt_ratio_nograd
         safety_discount = base_safety_discount ** dt_ratio_nograd
-
-        if target_physical_horizon is not None:
-            # Temporal Truncation: stop "thinking" once we reach the target physical time.
-            # This ensures fair safety evaluation vs discrete agents.
-            cumulative_time = jnp.cumsum(dt_ratio, axis=1)
-            # Mask includes all steps that START before or at the target time.
-            # We allow one "overshoot" step to ensure we cover the target time.
-            mask = (jnp.concatenate([jnp.zeros_like(cumulative_time[:, :1]), cumulative_time[:, :-1]], axis=1) < target_physical_horizon).astype(jnp.float32)
-            
-            # Identify the actual truncation step for correct bootstrapping
-            # This is the last 1 in the mask.
-            is_truncation_step = mask * (1.0 - jnp.concatenate([mask[:, 1:], jnp.zeros_like(mask[:, :1])], axis=1))
-            
-            # Apply mask to all temporal variables
-            discount = discount * mask
-            safety_discount = safety_discount * mask
-        else:
-            is_truncation_step = None
     else:
         # Create uniform discount array over the horizon for all batches
         shape = trajectories.action.shape[:-1]
         discount = jnp.full(shape, base_discount)
         safety_discount = jnp.full(shape, base_safety_discount)
-        is_truncation_step = None
-    
+        
     next_step = lambda x: x[:, 1:]
     current_step = lambda x: x[:, :-1]
     
@@ -281,38 +258,21 @@ def evaluate_actor(
     next_states = next_step(trajectories.next_state)
     bootstrap_values = nest_vmap(critic, 2, eqx.filter_vmap)(next_states)
     rewards = current_step(objective_sentiment(trajectories.reward, priors))
-    
-    # Corrected bootstrapping: if truncated, use the value at truncation step.
-    # Otherwise use the very last value in the horizon.
-    def compute_lambda_values_wrapped(bootstrap_v, rew, disc, truncation_mask):
-        tds = rew + (1.0 - lambda_) * disc * bootstrap_v
-        if truncation_mask is not None:
-            # Add bootstrap value only at the truncation step
-            tds = tds + (lambda_ * disc * bootstrap_v * truncation_mask)
-        else:
-            # Default behavior: add bootstrap at the very last step
-            tds = tds.at[-1].add(lambda_ * disc[-1] * bootstrap_v[-1])
-        return discounted_cumsum(tds, lambda_ * disc)
-
-    lambda_values = eqx.filter_vmap(compute_lambda_values_wrapped)(
-        bootstrap_values, rewards, discount_current, current_step(is_truncation_step) if is_truncation_step is not None else None
+    lambda_values = eqx.filter_vmap(compute_lambda_values)(
+        bootstrap_values, rewards, discount_current, lambda_
     )
-    
     bootstrap_safety_values = nest_vmap(safety_critic, 2, eqx.filter_vmap)(next_states)
     costs = current_step(constraint_sentiment(trajectories.cost, priors))
-    safety_lambda_values = eqx.filter_vmap(compute_lambda_values_wrapped)(
+    safety_lambda_values = eqx.filter_vmap(compute_lambda_values)(
         bootstrap_safety_values,
         costs,
         safety_discount_current,
-        current_step(is_truncation_step) if is_truncation_step is not None else None
+        lambda_,
     )
     planning_discount = eqx.filter_vmap(compute_discount)(discount_current, horizon - 1)
-    
-    # Time-weighted objective: weight each term by its duration (dt_ratio) 
-    # to make the objective time-invariant and remove the bias toward dt=1.
-    objective = (lambda_values * planning_discount * (current_step(dt_ratio_nograd) if continuous_time else 1.0)).mean()
+    objective = (lambda_values * planning_discount).mean()
     loss = -objective
-    constraint = safety_budget - (safety_lambda_values * planning_discount * (current_step(dt_ratio_nograd) if continuous_time else 1.0)).mean()
+    constraint = safety_budget - safety_lambda_values.mean()
     return ActorEvaluation(
         current_step(trajectories.next_state),
         lambda_values,
@@ -359,7 +319,6 @@ def update_safe_actor_critic(
     penalty_state: Any,
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
-    target_physical_horizon: float | None = None,
 ) -> SafeActorCriticStepResults:
     vmapped_rollout_fn = jax.vmap(model.sample, (None, 0, None, None))
     actor_grads, new_penalty_state, evaluation, metrics, step_scale = penalty_fn(
@@ -381,7 +340,6 @@ def update_safe_actor_critic(
             base_dt,
             objective_sentiment,
             constraint_sentiment,
-            target_physical_horizon,
         ),
         penalty_state,
         actor,

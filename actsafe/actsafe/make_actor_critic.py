@@ -75,5 +75,4 @@ def make_actor_critic(
         key=key,
         objective_sentiment=objective_sentiment,
         constraint_sentiment=constraint_sentiment,
-        target_physical_horizon=cfg.agent.continuous_time.get("target_physical_horizon", None) if continuous_time_enabled else None,
     )
