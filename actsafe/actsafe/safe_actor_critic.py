@@ -307,9 +307,12 @@ def evaluate_actor(
         current_step(is_truncation_step) if is_truncation_step is not None else None
     )
     planning_discount = eqx.filter_vmap(compute_discount)(discount_current, horizon - 1)
-    objective = (lambda_values * planning_discount).mean()
+    
+    # Time-weighted objective: weight each term by its duration (dt_ratio) 
+    # to make the objective time-invariant and remove the bias toward dt=1.
+    objective = (lambda_values * planning_discount * (current_step(dt_ratio_nograd) if continuous_time else 1.0)).mean()
     loss = -objective
-    constraint = safety_budget - safety_lambda_values.mean()
+    constraint = safety_budget - (safety_lambda_values * planning_discount * (current_step(dt_ratio_nograd) if continuous_time else 1.0)).mean()
     return ActorEvaluation(
         current_step(trajectories.next_state),
         lambda_values,
