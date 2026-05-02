@@ -7,11 +7,11 @@ training:
   action_repeat: 1  # Base simulation resolution
   epochs: 300
   safe: true
-  safety_budget: 100
+  safety_budget: 500
   checkpoint_every: 10
   
 agent:
-  offline_steps: 50000
+  offline_steps: 100000
   exploration_strategy: opax
   exploration_steps: 1000000
   model:

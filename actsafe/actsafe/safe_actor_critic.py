@@ -272,7 +272,7 @@ def evaluate_actor(
     planning_discount = eqx.filter_vmap(compute_discount)(discount_current, horizon - 1)
     objective = (lambda_values * planning_discount).mean()
     loss = -objective
-    constraint = safety_budget - (safety_lambda_values * planning_discount).mean()
+    constraint = safety_budget - safety_lambda_values.mean()
     return ActorEvaluation(
         current_step(trajectories.next_state),
         lambda_values,
