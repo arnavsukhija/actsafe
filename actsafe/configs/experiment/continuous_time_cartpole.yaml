@@ -7,9 +7,9 @@ training:
   action_repeat: 1  # Base simulation resolution
   epochs: 300
   safe: true
-  safety_budget: 500
+  safety_budget: 100
   checkpoint_every: 10
-  
+
 agent:
   offline_steps: 100000
   exploration_strategy: opax
@@ -20,7 +20,7 @@ agent:
     init_stddev: 0.025
     initialization_scale: 0.01
   sentiment:
-    constraint_pessimism: 2.0
+    constraint_pessimism: 5.0
   replay_buffer:
     sequence_length: 50
   continuous_time:

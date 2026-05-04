@@ -45,11 +45,14 @@ def lbsgd_update(
     def happy_case():
         lr, (lhs, rhs) = compute_lr(alpha_1, g, grad_f_1, m_0, m_1, eta_t)
         new_eta = eta_t / eta_rate
-        # Return the gradient for Adam, and the scale for the update
-        return g, LBSGDState(new_eta), (lr, lhs, rhs), (lr / base_lr)
+        # step_scale=1.0: Adam is the sole step-size controller (base_lr).
+        # LBSGD only controls direction (g vs grad_f_1); the lr value is used for
+        # logging/eta only. Pre-scaling inside Adam (old behavior) is equivalent.
+        return g, LBSGDState(new_eta), (lr, lhs, rhs), 1.0
 
     def fallback():
-        return grad_f_1, LBSGDState(eta_t), (0.0, 0.0, 0.0), (backup_lr / base_lr)
+        # Decrease eta even in fallback (mirrors happy-case; keeps dual variable moving).
+        return grad_f_1, LBSGDState(eta_t / eta_rate), (0.0, 0.0, 0.0), 1.0
 
     g, grad_f_1, alpha_1 = updates
     eta_t = state.eta
@@ -118,5 +121,6 @@ class LBSGDPenalizer:
             "agent/lbsgd/lhs": jnp.asarray(lhs),
             "agent/lbsgd/rhs": jnp.asarray(rhs),
             "agent/lbsgd/step_scale": jnp.asarray(step_scale),
+            "agent/lbsgd/safe": jnp.asarray(jnp.greater(alpha, _EPS), dtype=jnp.float32),
         }
         return updates, state, rest, metrics, step_scale
