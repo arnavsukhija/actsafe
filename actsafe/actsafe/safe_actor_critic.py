@@ -238,10 +238,9 @@ def evaluate_actor(
         # Compute per-step discounts: shape [batch_size, horizon]
         # STOP_GRADIENT is critical here! Otherwise the actor will hack the math:
         # 1. If it expects a future cost, it will increase dt_ratio to heavily discount it.
-        # 2. If it expects a negative reward, it will increase dt_ratio to shrink it.
         # This causes the massive safety oscillations and failure to swing up!
         dt_ratio_nograd = jax.lax.stop_gradient(dt_ratio)
-        discount = base_discount ** dt_ratio_nograd
+        discount = base_discount ** dt_ratio
         safety_discount = base_safety_discount ** dt_ratio_nograd
     else:
         # Create uniform discount array over the horizon for all batches
