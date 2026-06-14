@@ -14,7 +14,6 @@ array_parallelism: 256
 max_num_timeout: 100
 setup:
   - '#SBATCH --requeue'
-  - 'source /cluster/home/${oc.env:USER}/miniconda3/etc/profile.d/conda.sh && conda activate actsafe'
   - 'export MUJOCO_GL=egl'
   - 'export PYOPENGL_PLATFORM=egl'
   - 'export JAX_COMPILATION_CACHE_DIR=/cluster/scratch/${oc.env:USER}/.jax_cache'
