@@ -16,6 +16,15 @@ agent:
   exploration_strategy: opax
   exploration_steps: 1000000
   actor:
-    init_stddev: 0.025
+    # Upstream default. 0.025 is near-deterministic (logged actor entropy -8..-16);
+    # in the exploitation phase that policy cannot rediscover the swing-up even once
+    # the world model has learned the upright region.
+    init_stddev: 5.0
   sentiment:
-    constraint_pessimism: 50.0
+    # alpha in the cost UCB: cost_used = mean_cost + alpha * epistemic_uncertainty.
+    # OPAX reward ~ reward_scale(10) * epistemic_uncertainty drives the explorer toward
+    # high-uncertainty states; alpha=50 made the pessimistic cost (50*unc) dominate that
+    # reward (10*unc) in exactly those novel states, so info-gain exploration was repelled
+    # from the (unfamiliar but not actually unsafe) pole-balanced region. alpha=1 keeps a
+    # real pessimistic-safety margin while letting exploration win in uncertain states.
+    constraint_pessimism: 1.0

@@ -23,14 +23,19 @@ def interact(
     step: int,
     render_episodes: int = 0,
 ) -> tuple[list[Trajectory], int]:
-    episode_count = 0
+    # num_episodes counts parallel rollout *batches* (matching upstream, where
+    # episode_count incremented once per synchronized done.all()). Each batch
+    # contributes one episode per environment, so a batch stores num_envs
+    # episodes. Counting per-env here (and breaking mid-batch) silently cut the
+    # stored data by num_envs× and discarded half of every rollout.
+    batch_count = 0
     episodes: list[Trajectory] = []
-    
+
     with tqdm(
         total=num_episodes,
         unit=f"Batch (✕ {environment.num_envs} envs)",
     ) as pbar:
-        while episode_count < num_episodes:
+        while batch_count < num_episodes:
             observations = environment.reset()
             active_mask = np.ones(environment.num_envs, dtype=bool)
             per_env_trajectories = [Trajectory() for _ in range(environment.num_envs)]
@@ -84,27 +89,27 @@ def interact(
             # Batch complete. Update global step counter with total sim steps from this batch.
             step += batch_sim_steps
 
-            # Process all trajectories.
+            # Observe every environment in this batch (one episode each). All
+            # envs are kept — none are discarded — so a batch stores num_envs
+            # episodes, exactly like the upstream batched trajectory.
             for i in range(environment.num_envs):
                 trajectory = per_env_trajectories[i]
                 np_trajectory = trajectory.as_numpy()
-                
+
                 if train:
                     agent.observe(np_trajectory)
-                
+
                 reward, cost = _summarize_episodes(np_trajectory)
                 pbar.set_postfix({"reward": reward, "cost": cost})
-                
+
                 if render_episodes > 0:
                     render_episodes -= 1
-                    
+
                 episodes.append(trajectory)
-                pbar.update(1)
-                episode_count += 1
-                
-                if episode_count >= num_episodes:
-                    break
-                    
+
+            batch_count += 1
+            pbar.update(1)
+
     return episodes, step
 
 
