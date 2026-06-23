@@ -22,13 +22,14 @@ def make_actor_critic(
 
     continuous_time_enabled = cfg.agent.get("continuous_time", {}).get("enabled", False)
     if cfg.agent.safety_discount < 1.0 - np.finfo(np.float32).eps:
-        # safety_budget is the total episode cost limit; convert to discounted value by
-        # dividing by time_limit (getting per-step budget) and then the geometric series factor.
-        # This formula is correct for both discrete and continuous time because:
-        # - Cost accrues once per base sim step in both modes
-        # - The imagined rollout discount is already applied per-base-step via gamma^dt_ratio
+        # safety_budget is the total episode cost limit; convert to discounted value.
+        # The safety critic sees costs at env-step granularity (each env step accumulates
+        # action_repeat base steps of cost), so episode length in env steps is
+        # time_limit / action_repeat, not time_limit.
+        # In CT mode action_repeat=1 so this is identical to dividing by time_limit.
+        episode_steps = cfg.training.time_limit / cfg.training.action_repeat
         episode_safety_budget = (
-            cfg.training.safety_budget / cfg.training.time_limit
+            cfg.training.safety_budget / episode_steps
         ) / (1.0 - cfg.agent.safety_discount)
     else:
         episode_safety_budget = cfg.training.safety_budget
