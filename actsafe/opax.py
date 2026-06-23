@@ -30,7 +30,7 @@ def modify_reward(
         # maximum and freeze the agent (force=0, dt=max).
         pseudo_time = trajectory.action[..., -1]
         time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
-        dt_ratio = jnp.maximum(jnp.round(time_for_action / base_dt), 1.0)
+        dt_ratio = jnp.maximum(jnp.floor(time_for_action / base_dt), 1.0)
         # stop_gradient on dt_ratio is critical: without it Opax could learn to
         # *minimize* dt_ratio to inflate the normalized reward, creating the
         # opposite pathology.

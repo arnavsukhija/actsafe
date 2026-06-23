@@ -233,11 +233,14 @@ def evaluate_actor(
         dt_raw = time_for_action / base_dt
         # Straight-through estimator: round for the logic, but pass gradients through.
         # This allows the actor to learn pseudo_time via backprop through the world model.
-        dt_ratio = dt_raw + jax.lax.stop_gradient(jnp.maximum(jnp.round(dt_raw), 1.0) - dt_raw)
+        dt_ratio = dt_raw + jax.lax.stop_gradient(jnp.maximum(jnp.floor(dt_raw), 1.0) - dt_raw)
         
         # Compute per-step discounts: shape [batch_size, horizon]
-        discount = base_discount ** dt_ratio
-        safety_discount = base_safety_discount ** dt_ratio
+        # stop_gradient on dt_ratio prevents the actor from hacking safety by
+        # increasing pseudo_time to shrink γ^dt → 0 and hide future costs.
+        _dt_sg = jax.lax.stop_gradient(dt_ratio)
+        discount = base_discount ** _dt_sg
+        safety_discount = base_safety_discount ** _dt_sg
     else:
         # Create uniform discount array over the horizon for all batches
         shape = trajectories.action.shape[:-1]

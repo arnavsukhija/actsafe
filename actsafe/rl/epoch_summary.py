@@ -100,14 +100,14 @@ class EpochSummary:
 
         # Convert pseudo_time to dt_ratio using the same formula as the environment
         time_for_action = ((self.tmax - self.tmin) / 2.0 * pseudo_time) + (self.tmax + self.tmin) / 2.0
-        dt_ratio = np.maximum(np.round(time_for_action / self.base_dt), 1.0)
+        dt_ratio = np.maximum(np.floor(time_for_action / self.base_dt), 1.0)
 
         return {
             "train/ct/mean_dt_ratio": float(np.mean(dt_ratio)),
             "train/ct/std_dt_ratio": float(np.std(dt_ratio)),
             "train/ct/frac_dt_1": float(np.mean(dt_ratio == 1.0)),
             "train/ct/frac_dt_max": float(np.mean(
-                dt_ratio == np.round(self.tmax / self.base_dt)
+                dt_ratio == np.floor(self.tmax / self.base_dt)
             )),
             "train/ct/mean_abs_force": float(np.mean(np.abs(force))),
             "train/ct/std_force": float(np.std(force)),
