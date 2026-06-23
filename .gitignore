@@ -1,3 +1,8 @@
+# Session handoff / memory artifacts (not repo content)
+handoff/
+handoff.tar.gz
+handoff.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
