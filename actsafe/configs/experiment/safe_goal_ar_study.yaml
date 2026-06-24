@@ -7,49 +7,48 @@
 #   constraint violations, because a longer open-loop hold is a blind window in
 #   which a developing violation cannot be sensed or corrected.
 #
-# This is pure DISCRETE ActSafe — the upstream-faithful path, NO continuous-time
-# machinery. Why that makes the comparison clean:
-#   • TimeLimit wraps the BASE env, ActionRepeat wraps that
-#     (episodic_async_env.py:193-209) → every action_repeat runs the SAME 1000
-#     base steps per episode, just chunked into fewer decisions. Physical episode
-#     length is invariant across the sweep → fair frequency comparison.
-#   • ActionRepeat sums RAW per-step cost (wrappers.py:26-27, no within-window
-#     discounting) → realized episode cost is frequency-invariant.
-#   • make_actor_critic scales the discounted budget by action_repeat → the
-#     constraint is the SAME "total episode cost <= safety_budget" at every AR.
+# This is pure DISCRETE ActSafe — NO continuous-time machinery.
 #
-# TASK: go_to_goal (dense reward, 9 hazards + 10 vases). Dense reward is chosen
-# deliberately to avoid the do-nothing/exploration-starvation confound seen on
-# cartpole: if the agent does nothing it is trivially safe at every frequency and
-# the U-shape cannot appear. Once the signal is established, go_to_goal_scarce is
-# the harder, paper-faithful variant to confirm on.
+# IMPORTANT — this config is the canonical DENSE go_to_goal config from the paper
+# (Fig 4 safety benchmark, upstream `safety_gym.yaml`). The ONLY thing that should
+# be swept is training.action_repeat. An earlier version of this file imported
+# hyperparameters from the SPARSE/scarce configs (init_stddev=0.025,
+# exploration_steps=850k, model_initialization_scale=0.05); those are WRONG for the
+# dense task and collapsed reward to ~0. The dense task uses the agent defaults
+# (init_stddev=5.0) — do not re-add the scarce values here.
 #
-# Everything below is the paper-standard Safety-Gym ActSafe config; the ONLY thing
-# swept is training.action_repeat (on the command line). Do not add other overrides
-# to the sweep — the whole point is to isolate frequency.
+# Anchor: action_repeat=2 is the paper-validated baseline (Ĵr ≈ 15–20). Reproduce
+# that FIRST with `+experiment=safety_gym` before trusting any swept point.
+#
+# Fairness across the sweep:
+#   • TimeLimit wraps the BASE env, ActionRepeat wraps that → every action_repeat
+#     runs the same 1000 base steps per episode, just chunked into fewer decisions.
+#   • ActionRepeat sums RAW per-step cost (no within-window discounting) → realized
+#     episode cost is frequency-invariant.
+#   • make_actor_critic scales the discounted budget by action_repeat so the
+#     constraint is the same "total episode cost <= safety_budget" at every AR.
+#     NOTE: this makes the AR=2 discounted budget differ from upstream's code
+#     (which always divides by time_limit); reconcile before comparing absolute
+#     safety numbers to the paper.
 # ─────────────────────────────────────────────────────────────────────────────
 defaults:
   - override /environment: safe_adaptation_gym
 
 environment:
   safe_adaptation_gym:
-    task: go_to_goal
+    task: go_to_goal          # DENSE reward (Fig 4 safety benchmark)
 
 training:
   epochs: 100
   safe: true
-  action_repeat: 1          # SWEPT on the command line: 1,2,4,8
-  safety_budget: 25         # standard Safety-Gym cost limit (total per episode)
+  action_repeat: 2            # SWEPT on the command line: 1,2,4,8 (anchor = 2)
+  safety_budget: 25           # standard Safety-Gym cost limit (total per episode)
 
 agent:
   exploration_strategy: opax
-  exploration_steps: 850000 # base steps → exploration phase is same physical
-                            # length at every action_repeat
-  actor:
-    init_stddev: 0.025      # paper default for Safety-Gym (OPAX supplies
-                            # exploration here, unlike the cartpole case)
+  exploration_steps: 500000   # matches upstream safety_gym.yaml (dense)
   sentiment:
-    model_initialization_scale: 0.05
-    # constraint_pessimism intentionally LEFT at the default (null -> bayes/mean
-    # cost), matching the paper-faithful Safety-Gym ActSafe. Pessimism (cost-UCB)
-    # is a SECONDARY knob for later, not part of this isolation study.
+    constraint_pessimism: 0.001  # matches upstream safety_gym.yaml (≈ no pessimism)
+  # actor.init_stddev intentionally NOT set → agent default 5.0 (the dense-task
+  # value). Do NOT set 0.025 here; that is the sparse-task value and starves the
+  # policy of action exploration on the dense task.

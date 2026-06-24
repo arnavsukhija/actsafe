@@ -1,5 +1,5 @@
-# Session handoff / memory artifacts (not repo content)
-handoff/
+# Session handoff / memory: the handoff/ folder IS tracked (checked-in mirror of the
+# assistant auto-memory so any device can resume). Only the packaged archives are ignored.
 handoff.tar.gz
 handoff.zip
 
