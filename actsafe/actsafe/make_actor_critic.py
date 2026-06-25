@@ -22,11 +22,15 @@ def make_actor_critic(
 
     continuous_time_enabled = cfg.agent.get("continuous_time", {}).get("enabled", False)
     if cfg.agent.safety_discount < 1.0 - np.finfo(np.float32).eps:
-        # safety_budget is the total episode cost limit; convert to discounted value.
-        # The safety critic sees costs at env-step granularity (each env step accumulates
-        # action_repeat base steps of cost), so episode length in env steps is
-        # time_limit / action_repeat, not time_limit.
-        # In CT mode action_repeat=1 so this is identical to dividing by time_limit.
+        # Convert the episode cost limit (safety_budget) into the discounted threshold
+        # the safety critic constrains (V_c <= threshold). The critic discounts per
+        # AGENT step and ActionRepeat sums `action_repeat` RAW base-step costs into each
+        # agent-step cost, so V_c scales ~linearly with action_repeat for a fixed
+        # physical trajectory. We therefore divide by the episode length in AGENT steps
+        # (time_limit / action_repeat), so the SAME budget d enforces the SAME realized
+        # (undiscounted) episode-cost limit at EVERY control frequency -- the
+        # fair-comparison invariant for the action-repeat safety sweep (decided
+        # 2026-06-25). Identical to the paper formula at action_repeat=1.
         episode_steps = cfg.training.time_limit / cfg.training.action_repeat
         episode_safety_budget = (
             cfg.training.safety_budget / episode_steps

@@ -48,7 +48,13 @@ agent:
   exploration_strategy: opax
   exploration_steps: 500000   # matches upstream safety_gym.yaml (dense)
   sentiment:
-    constraint_pessimism: 0.001  # matches upstream safety_gym.yaml (≈ no pessimism)
+    # Deployment safety margin (cost-UCB = mean + kappa*uncertainty). 0.001 (paper
+    # safety_gym value) ≈ no margin -> LBSGD parks the agent AT the budget and realized
+    # cost overshoots. kappa=0.1 gives a modest honest margin (baseline near/under
+    # budget) while staying well clear of the exploration-starvation regime (coupled to
+    # OPAX, exploration.py:49). Held CONSTANT across the action_repeat sweep (fair).
+    # If reward survives but cost is still >=25, bump toward 0.3-0.5 in a round-2 sweep.
+    constraint_pessimism: 0.1
   # actor.init_stddev intentionally NOT set → agent default 5.0 (the dense-task
   # value). Do NOT set 0.025 here; that is the sparse-task value and starves the
   # policy of action exploration on the dense task.
