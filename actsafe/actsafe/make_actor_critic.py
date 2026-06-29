@@ -80,4 +80,5 @@ def make_actor_critic(
         key=key,
         objective_sentiment=objective_sentiment,
         constraint_sentiment=constraint_sentiment,
+        actor_entropy_coef=cfg.agent.get("actor_entropy_coef", 0.0),
     )

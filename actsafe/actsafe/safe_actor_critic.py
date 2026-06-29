@@ -66,6 +66,7 @@ class SafeModelBasedActorCritic:
         penalizer: Penalizer,
         objective_sentiment: Sentiment,
         constraint_sentiment: Sentiment,
+        actor_entropy_coef: float = 0.0,
     ):
         actor_key, critic_key, safety_critic_key = jax.random.split(key, 3)
         self.actor = ContinuousActor(
@@ -94,6 +95,7 @@ class SafeModelBasedActorCritic:
         self.penalizer = penalizer
         self.objective_sentiment = objective_sentiment
         self.constraint_sentiment = constraint_sentiment
+        self.actor_entropy_coef = actor_entropy_coef
 
     def update(
         self,
@@ -127,6 +129,7 @@ class SafeModelBasedActorCritic:
             self.penalizer.state,
             self.objective_sentiment,
             self.constraint_sentiment,
+            self.actor_entropy_coef,
         )
         self.actor = results.new_actor
         self.critic = results.new_critic
@@ -220,6 +223,7 @@ def evaluate_actor(
     base_dt: float | None,
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
+    actor_entropy_coef: float = 0.0,
 ) -> ActorEvaluation:
     trajectories, priors = rollout_fn(horizon, initial_states, key, actor.act)
     
@@ -267,6 +271,15 @@ def evaluate_actor(
     planning_discount = eqx.filter_vmap(compute_discount)(discount_current, horizon - 1)
     objective = (lambda_values * planning_discount).mean()
     loss = -objective
+    if actor_entropy_coef > 0.0:
+        # Dreamer-style entropy regularizer: keeps the imagination actor from saturating
+        # to a deterministic policy (the entropy-collapse failure where entropy -> the
+        # ~-16.57 floor and reward -> 0). `actor_entropy` returns mean policy entropy
+        # (-log_prob); subtracting it from the loss MAXIMIZES entropy. It is computed on
+        # the full action vector, so in continuous-time mode it also regularizes the dt
+        # head (which shares init_stddev and could otherwise saturate to t_min/t_max).
+        # Flows into the OBJECTIVE gradient via the penalizer (not the safety constraint).
+        loss = loss - actor_entropy_coef * actor_entropy(actor, initial_states)
     constraint = safety_budget - safety_lambda_values.mean()
     return ActorEvaluation(
         current_step(trajectories.next_state),
@@ -314,6 +327,7 @@ def update_safe_actor_critic(
     penalty_state: Any,
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
+    actor_entropy_coef: float = 0.0,
 ) -> SafeActorCriticStepResults:
     vmapped_rollout_fn = jax.vmap(model.sample, (None, 0, None, None))
     actor_grads, new_penalty_state, evaluation, metrics, step_scale = penalty_fn(
@@ -335,6 +349,7 @@ def update_safe_actor_critic(
             base_dt,
             objective_sentiment,
             constraint_sentiment,
+            actor_entropy_coef,
         ),
         penalty_state,
         actor,

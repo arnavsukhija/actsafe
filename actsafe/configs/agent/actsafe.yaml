@@ -43,6 +43,10 @@ model_optimizer:
 discount: 0.99
 safety_discount: 0.99
 lambda_: 0.95
+# Dreamer-style actor entropy bonus. 0.0 = upstream behavior (no entropy term in the actor
+# loss -> some seeds suffer entropy collapse: policy saturates, entropy -> ~-16.57, reward -> 0).
+# Set >0 (try 1e-3) to regularize; flows into the objective gradient, also covers the CT dt head.
+actor_entropy_coef: 0.0
 continuous_time:
   enabled: false
   min_time_factor: 1
