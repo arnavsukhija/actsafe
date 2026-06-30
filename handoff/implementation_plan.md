@@ -449,9 +449,11 @@ wired. The variable-dt method now builds end-to-end on PointGoal. Changes:
   already explores); uncomment `actor.dt_init_stddev` in safe_goal_tase.yaml only if the diagnostic shows
   the dt head pinned. This is the likely fix for the past cartpole CT failures (init_stddev=0.025).
 
-SMOKE TEST (run this FIRST, ~20 min, catches integration crashes I can't hit locally — no jax here):
+SMOKE TEST (run this FIRST, ~20 min, catches integration crashes I can't hit locally — no jax here).
+NOTE: `-m` is required even for the single smoke run — without multirun the slurm launcher doesn't
+schedule the 4090, it tries to run locally:
 ```
-python train_actsafe.py +experiment=safe_goal_tase +hardware=4090_rtx \
+python train_actsafe.py -m +experiment=safe_goal_tase +hardware=4090_rtx \
   +wandb.project=actsafe-ct-pointgoal training.epochs=2 training.seed=0
 ```
 Smoke-test checks (the OPEN VERIFICATION items): (b) the (4,64,64)→(3,64,64) image strip runs; (c) the
@@ -459,12 +461,23 @@ dt head is NOT saturated to one end — log/inspect `info['dt']` histogram (entr
 still pinned, give the dt head its own init scale); (d) `info['steps']`/`info['dt']` flow through
 acting.py step-counting so variable-length episodes book-keep correctly.
 
-THEN the overnight sweep (the key diagnostic = is the dt histogram non-degenerate?):
+THEN the seed-0 grid (key diagnostic = is the dt histogram non-degenerate?). Sweep switch_cost ×
+max_time_factor first on seed 0 (9 runs), read train/ct/{frac_dt_1,frac_dt_max,std_dt_ratio} to find
+the adaptive cell, THEN spend seeds 1,2 on the winner:
 ```
-python train_actsafe.py -m +experiment=safe_goal_tase +hardware=4090_rtx hydra/launcher=slurm \
+python train_actsafe.py -m +experiment=safe_goal_tase +hardware=4090_rtx \
   +wandb.project=actsafe-ct-pointgoal \
-  agent.continuous_time.switch_cost=0.02,0.1,0.5 training.seed=0,1,2
+  agent.continuous_time.max_time_factor=4,8,16 \
+  agent.continuous_time.switch_cost=0.002,0.01,0.05 training.seed=0
 ```
+
+- **OPAX dt-normalization ABLATION FLAG ADDED 2026-06-30**: `continuous_time.opax_dt_normalization`
+  (default true). Gates the `new_rewards /= stop_gradient(dt_ratio)` in opax.py (per-physical-time
+  uncertainty; without it OPAX inflates uncertainty by predicting far ahead → locks dt to max,
+  freezes the agent). Threaded exploration.py → OpaxBridge → opax.modify_reward. Both this and the
+  discount STE (safe_actor_critic.py:240) are HARD-GATED behind continuous_time → the validated AR
+  baseline is byte-identical; only TASE runs touch them. Ablate with
+  `agent.continuous_time.opax_dt_normalization=true,false`.
 
 ### TASE TASK ORDER (this week) — DONE; superseded by the block above
 1. **T2** (raw-cost fix) — one-line correctness fix, unblocks every CT number. Do first.

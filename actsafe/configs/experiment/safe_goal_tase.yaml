@@ -6,6 +6,8 @@
 #
 # SWEEP:
 #   agent.continuous_time.switch_cost=0.002,0.01,0.05
+#   agent.continuous_time.max_time_factor=4,8,16
+#   agent.continuous_time.opax_dt_normalization=true,false   # ablation
 #   training.seed=0,1,2
 defaults:
   - override /environment: safe_adaptation_gym

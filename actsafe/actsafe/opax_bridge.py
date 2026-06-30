@@ -14,6 +14,7 @@ class OpaxBridge(eqx.Module):
     tmin: float | None = eqx.field(static=True)
     tmax: float | None = eqx.field(static=True)
     base_dt: float | None = eqx.field(static=True)
+    dt_normalization: bool = eqx.field(static=True)
 
     def sample(
         self,
@@ -41,4 +42,5 @@ class OpaxBridge(eqx.Module):
             tmin=self.tmin,
             tmax=self.tmax,
             base_dt=self.base_dt,
+            dt_normalization=self.dt_normalization,
         )

@@ -56,6 +56,7 @@ class OpaxExploration(Exploration):
         self.tmin = ct_cfg.get("t_min", None) if self.continuous_time else None
         self.tmax = ct_cfg.get("t_max", None) if self.continuous_time else None
         self.base_dt = ct_cfg.get("base_dt", None) if self.continuous_time else None
+        self.opax_dt_normalization = ct_cfg.get("opax_dt_normalization", True)
 
     def update(
         self,
@@ -71,6 +72,7 @@ class OpaxExploration(Exploration):
             tmin=self.tmin,
             tmax=self.tmax,
             base_dt=self.base_dt,
+            dt_normalization=self.opax_dt_normalization,
         )
         outs = self.actor_critic.update(model, initial_states, key)
         outs = {f"{_append_opax(k)}": v for k, v in outs.items()}

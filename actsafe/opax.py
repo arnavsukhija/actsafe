@@ -16,24 +16,27 @@ def modify_reward(
     tmin: float | None = None,
     tmax: float | None = None,
     base_dt: float | None = None,
+    dt_normalization: bool = True,
 ) -> tuple[Prediction, ShiftScale]:
     new_rewards = (
         normalized_epistemic_uncertainty(distributions, scale=epistemic_scale) * scale
     )
 
-    if continuous_time and tmin is not None and tmax is not None and base_dt is not None:
-        # Normalize Opax reward by the time factor (dt_ratio) to convert the
-        # objective from "maximize total uncertainty" to "maximize uncertainty
-        # per unit of physical time".  Without this, the actor exploits the
-        # dt_ratio dimension: predicting further into the future inflates
-        # epistemic uncertainty for free, causing Opax to lock dt_ratio to its
-        # maximum and freeze the agent (force=0, dt=max).
+    if (
+        continuous_time
+        and dt_normalization
+        and tmin is not None
+        and tmax is not None
+        and base_dt is not None
+    ):
+        # Normalize Opax reward by the time factor (dt_ratio) -> "uncertainty per unit
+        # physical time". Without it the actor inflates uncertainty by predicting far
+        # ahead, locking dt_ratio to max and freezing the agent (force=0, dt=max).
+        # Ablatable via continuous_time.opax_dt_normalization.
         pseudo_time = trajectory.action[..., -1]
         time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
         dt_ratio = jnp.maximum(jnp.round(time_for_action / base_dt), 1.0)
-        # stop_gradient on dt_ratio is critical: without it Opax could learn to
-        # *minimize* dt_ratio to inflate the normalized reward, creating the
-        # opposite pathology.
+        # stop_gradient is critical: else Opax minimizes dt_ratio to inflate the reward.
         new_rewards = new_rewards / jax.lax.stop_gradient(dt_ratio)
 
     if stop_grad:
