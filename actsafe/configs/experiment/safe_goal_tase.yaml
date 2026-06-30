@@ -1,0 +1,40 @@
+# @package _global_
+# TASE — Time-Adaptive Safe Exploration on PointGoal. The agent outputs an action +
+# a hold-duration dt; SwitchCostWrapper executes the hold and charges a switch_cost.
+# Reuses the validated dense go_to_goal AR-study setup. Full rationale, budget/discount
+# accounting, and the sweep guidance live in handoff/implementation_plan.md.
+#
+# SWEEP:
+#   agent.continuous_time.switch_cost=0.002,0.01,0.05
+#   training.seed=0,1,2
+defaults:
+  - override /environment: safe_adaptation_gym
+
+environment:
+  safe_adaptation_gym:
+    task: go_to_goal          # DENSE reward (matches the AR-study baseline)
+
+training:
+  epochs: 100
+  safe: true
+  action_repeat: 1            # CT base resolution; the hold is chosen per step by the agent
+  safety_budget: 25           # same standard Safety-Gym cost limit as the baseline
+
+agent:
+  exploration_strategy: opax
+  exploration_steps: 500000   # matches the dense baseline
+  model:
+    continuous_time: true     # strip the appended time-to-go channel before the world model
+  sentiment:
+    constraint_pessimism: 0.1  # same honest safety margin as the baseline (held fixed)
+  actor_entropy_coef: 0.01     # entropy bonus keeps the action + dt heads exploring
+  continuous_time:
+    enabled: true
+    min_time_factor: 1         # shortest hold = act every base step (highest frequency)
+    max_time_factor: 16        # longest hold = 16 base steps (matches AR16)
+    switch_cost: 0.01          # per-decision cost; SWEEP {0.002, 0.01, 0.05}
+    # base_dt inferred at runtime from the env
+  # If the dt head saturates (train/ct/frac_dt_1 or frac_dt_max ~1, std_dt_ratio ~0),
+  # give it its own init std by uncommenting (see handoff):
+  # actor:
+  #   dt_init_stddev: 15.0

@@ -12,6 +12,7 @@ from actsafe.rl.utils import rl_initialize_weights_trick
 class ContinuousActor(eqx.Module):
     net: eqx.nn.MLP
     init_stddev: float = eqx.static_field()
+    dt_init_stddev: float | None = eqx.static_field()
 
     def __init__(
         self,
@@ -21,6 +22,7 @@ class ContinuousActor(eqx.Module):
         hidden_size: int,
         init_stddev: float,
         initialization_scale: float,
+        dt_init_stddev: float | None = None,
         *,
         key: jax.Array,
     ):
@@ -36,11 +38,19 @@ class ContinuousActor(eqx.Module):
             weight_scale=initialization_scale,
         )
         self.init_stddev = init_stddev
+        # Optional dedicated init std for the LAST action dim (TASE dt head). None ->
+        # shares init_stddev (byte-identical to upstream). See handoff for when to set it.
+        self.dt_init_stddev = dt_init_stddev
 
     def __call__(self, state: jax.Array) -> trx.Transformed:
         x = self.net(state)
         mu, stddev = jnp.split(x, 2, axis=-1)
         init_std = inv_softplus(self.init_stddev)
+        if self.dt_init_stddev is not None:
+            # Per-dim init std: motor dims keep init_stddev, dt head (last dim) gets its own.
+            init_std = jnp.full((stddev.shape[-1],), init_std).at[-1].set(
+                inv_softplus(self.dt_init_stddev)
+            )
         stddev = jnn.softplus(stddev + init_std) + 1e-4
         mu = 5.0 * jnn.tanh(mu / 5.0)
         dist = trx.Normal(mu, stddev)

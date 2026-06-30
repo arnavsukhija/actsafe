@@ -95,22 +95,32 @@ class SwitchCostWrapper(Wrapper):
                  t_min: float, 
                  t_max: float, 
                  switch_cost: SwitchCost = ConstantSwitchCost(1.0),
-                 discounting: float = 1.0):
+                 discounting: float = 1.0,
+                 cost_discounting: float | None = None,
+                 dt: float | None = None):
         super().__init__(env)
         self.switch_cost = switch_cost
         self.tmin = t_min
         self.tmax = t_max
         self.discounting = discounting
+        # Cost discounted within the hold by the safety discount (defaults to reward discount).
+        self.cost_discounting = (
+            discounting if cost_discounting is None else cost_discounting
+        )
         def _get_attr(e, name, default=None):
             try:
                 return e.get_wrapper_attr(name)
             except (AttributeError, KeyError):
                 return getattr(e, name, default)
 
-        self.dt = _get_attr(self.env, 'dt')
-        if self.dt is None:
-            self.dt = _get_attr(self.env, 'control_timestep', lambda: 0.01)()
-            
+        # Prefer the explicit control dt passed by the factory; fall back to attr probing.
+        if dt is not None:
+            self.dt = dt
+        else:
+            self.dt = _get_attr(self.env, 'dt')
+            if self.dt is None:
+                self.dt = _get_attr(self.env, 'control_timestep', lambda: 0.01)()
+
         max_steps = _get_attr(self.env, '_max_episode_steps', 1000)
         time_limit = _get_attr(self.env, 'time_limit')
         if time_limit is not None:
@@ -178,6 +188,7 @@ class SwitchCostWrapper(Wrapper):
         truncated = False
         total_reward = 0.0
         total_cost = 0.0
+        total_cost_realized = 0.0
         current_step = 0
         info = {"steps": 0}
         intermediate_states = []
@@ -187,9 +198,12 @@ class SwitchCostWrapper(Wrapper):
             obs, reward, done, truncated, step_info = self.env.step(u)
             intermediate_states.append(obs)
             
-            # apply simple discounting within the step
+            # Discount reward and cost within the hold (chunk-invariant macro-MDP); raw
+            # cost summed separately for the d=25 metric. See handoff for the derivation.
+            step_cost = step_info.get('cost', 0.0)
             total_reward += (self.discounting ** current_step) * reward
-            total_cost += (self.discounting ** current_step) * step_info.get('cost', 0.0)
+            total_cost += (self.cost_discounting ** current_step) * step_cost
+            total_cost_realized += step_cost
             
             # Update info with latest from step_info (excluding specific accumulation keys)
             for k, v in step_info.items():
@@ -216,8 +230,9 @@ class SwitchCostWrapper(Wrapper):
             augmented_obs = np.concatenate([obs, time_channel], axis=0)
         
         info['steps'] = current_step
-        info['cost'] = total_cost
-        info['dt'] = time_for_action 
+        info['cost'] = total_cost                    # discounted-within-hold -> critic
+        info['cost_realized'] = total_cost_realized  # raw physical sum -> d=25 metric (TODO: wire to log)
+        info['dt'] = time_for_action
         info['intermediate_states'] = intermediate_states
         
         return augmented_obs, float(total_reward), done, truncated, info

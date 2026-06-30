@@ -11,6 +11,36 @@ Companion docs in this `handoff/` folder (mirror of the auto-memory): `MEMORY.md
 
 ---
 
+## NOTE FOR SUPERVISOR MEETING — reward-discount confound (deferred 2026-06-30)
+
+**Status: known, understood, NOT fixed. Deliberately deferred so it doesn't block TASE.**
+
+The fixed-AR reward numbers are **not directly comparable across control frequencies**, because
+the agent discounts per *decision* (flat `discount=0.99` per agent step), not per unit physical
+time. At `action_repeat=k` one decision spans `k` base steps, so:
+- the effective physical horizon scales with `k` (AR1 ≈ 100 base steps, AR8 ≈ 800), and
+- the discounted reward objective scales ~linearly in `k`.
+
+This is why AR8's reported reward (~20) looked higher than AR1's (~8) — largely a units/horizon
+artifact, not a competence gap. **The cost/safety result is unaffected:** realized cost is summed
+undiscounted over the same 1000 base steps, and the safety budget is already made frequency-fair
+via budget scaling in `make_actor_critic.py`. So the *headline (cost rises as frequency drops,
+crosses budget)* stands; only the reward *axis* is confounded.
+
+**The fix (if/when we want it):** hold the physical horizon fixed by anchoring the discount at the
+paper's `action_repeat=2`: `gamma_agent = discount ** (action_repeat / 2)`. This keeps a ~200-base-
+step horizon at every frequency, reproduces the paper at AR2, and would make reward land at paper
+level (~15) flat across the sweep. Implemented and validated on 2026-06-30, then **reverted** to
+keep the baseline byte-identical to the reported figure and avoid stacking unverified changes
+before the meeting. The continuous-time/TASE path already discounts correctly per base step
+(`base_discount ** dt_ratio`), so this only ever mattered for the discrete study.
+
+**Talking point for the meeting:** "the reward axis across fixed frequencies is confounded by
+per-decision discounting; I have the frequency-fair correction ready (anchored at the paper's AR),
+but the safety result — which is the contribution — doesn't depend on it."
+
+---
+
 ## WHERE WE ARE (2026-06-24)
 
 **Strategy (decided 2026-06-23, see `project_strategy_2026-06-23.md`):** the whole story
@@ -383,7 +413,60 @@ comes from a capable policy, not a do-nothing one" — this also pre-empts the "
 inaction?" question. Robustness across κ stated verbally, not plotted. Entropy fix (T6) stays
 deferred to TASE prep. Update drafted at `handoff/supervisor_update_2026-06-29.md`.
 
-### TASE TASK ORDER (this week)
+### TASE IMPLEMENTED 2026-06-30 — wiring complete, smoke test pending
+
+T1/T2/T3/T5 are DONE and statically validated (parse + budget math); T6 (entropy) was already
+wired. The variable-dt method now builds end-to-end on PointGoal. Changes:
+- **T1** — `benchmark_suites/safe_adaptation_gym/__init__.py`: wraps the env in `SwitchCostWrapper`
+  (OUTERMOST, after `ChannelFirst`) when `agent.continuous_time.enabled`. The worker
+  (`episodic_async_env.py:208`) already skips `ActionRepeat` when it detects `SwitchCostWrapper`.
+- **T2** — `rl/wrappers.py`: cost is discounted within the hold by `safety_discount ** sub_step`
+  (mirrors reward; revised 2026-06-30 after the user's chunk-invariance argument — a raw sum makes the
+  per-step cost depend on how time is chopped into holds once dt is adaptive, breaking the SMDP). The
+  critic/world-model see this CHUNK-INVARIANT discounted cost; `info['cost_realized']` carries the raw
+  physical sum for the d=25 plot (NOT yet wired into `train/cost_return` — TODO before the publication
+  figure; a 6-field Transition change, deferred to avoid a blind ripple. For TASE the gap is small:
+  cost is incurred at small dt near hazards where discounted≈realized).
+- **T3** — `make_actor_critic.py`: CT path uses the frequency-INDEPENDENT threshold
+  `d / (time_limit*(1-safety_discount))` (= 2.5 for d=25), decoupled from action_repeat. Discrete
+  AR-study path byte-identical (still 5.0 at AR2).
+- **T5** — `configs/experiment/safe_goal_tase.yaml`: dense go_to_goal, image obs, `model.continuous_time=true`,
+  min/max_time_factor=1/16, switch_cost=0.1 (swept), κ=0.1, actor_entropy_coef=0.01, opax, init_stddev default.
+- **dt consistency**: the trainer's `base_dt = env.get_attr("dt")` resolves to `SwitchCostWrapper.self.dt`
+  (same object in the stack), so `dt_ratio == num_repetitions` exactly — absolute dt cancels.
+- **dt extraction FIXED 2026-06-30**: safe_adaptation_gym exposes NO Gym `dt`/`control_timestep`, so the
+  old code silently fell back to 0.01. The REAL control dt = `robot.sim.model.opt.timestep (0.004) *
+  _ROBOT_TO_CONTROL_FREQUENCY[robot]` → **point = 0.02 (50 Hz)**, car 0.04, doggo 0.048. New
+  `_control_dt()` helper in the factory reads this and passes it EXPLICITLY to `SwitchCostWrapper(dt=...)`
+  (new param). dm_control was already correct (cartpole control_timestep = 0.01, NOT 0.02 — verified
+  against the live sim). Absolute dt cancels in the discounting math, but it's now physically correct for
+  reporting control frequency in Hz (the paper's axis).
+- **dt-head saturation diagnostic ALREADY EXISTS** (`epoch_summary.continuous_time_metrics`, logged at
+  trainer.py:152): `train/ct/{mean_dt_ratio,std_dt_ratio,frac_dt_1,frac_dt_max}`. frac_dt_1/frac_dt_max≈1
+  = saturated; std≈0 = collapsed. Watch these in the smoke test.
+- **dt-head init scale (opt-in) ADDED**: `ContinuousActor.dt_init_stddev` (default None = byte-identical;
+  the last/dt action dim can get its own initial exploration). NOT set for PointGoal (init_stddev=5.0
+  already explores); uncomment `actor.dt_init_stddev` in safe_goal_tase.yaml only if the diagnostic shows
+  the dt head pinned. This is the likely fix for the past cartpole CT failures (init_stddev=0.025).
+
+SMOKE TEST (run this FIRST, ~20 min, catches integration crashes I can't hit locally — no jax here):
+```
+python train_actsafe.py +experiment=safe_goal_tase +hardware=4090_rtx \
+  +wandb.project=actsafe-ct-pointgoal training.epochs=2 training.seed=0
+```
+Smoke-test checks (the OPEN VERIFICATION items): (b) the (4,64,64)→(3,64,64) image strip runs; (c) the
+dt head is NOT saturated to one end — log/inspect `info['dt']` histogram (entropy coef should help; if
+still pinned, give the dt head its own init scale); (d) `info['steps']`/`info['dt']` flow through
+acting.py step-counting so variable-length episodes book-keep correctly.
+
+THEN the overnight sweep (the key diagnostic = is the dt histogram non-degenerate?):
+```
+python train_actsafe.py -m +experiment=safe_goal_tase +hardware=4090_rtx hydra/launcher=slurm \
+  +wandb.project=actsafe-ct-pointgoal \
+  agent.continuous_time.switch_cost=0.02,0.1,0.5 training.seed=0,1,2
+```
+
+### TASE TASK ORDER (this week) — DONE; superseded by the block above
 1. **T2** (raw-cost fix) — one-line correctness fix, unblocks every CT number. Do first.
 2. **T1** (wire wrapper into PointGoal) + **T3** (CT budget guard) — makes `enabled=true` actually
    build the variable-dt env on the validated testbed with the right d=25 bar.
