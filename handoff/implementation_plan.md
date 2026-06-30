@@ -450,10 +450,12 @@ wired. The variable-dt method now builds end-to-end on PointGoal. Changes:
   the dt head pinned. This is the likely fix for the past cartpole CT failures (init_stddev=0.025).
 
 SMOKE TEST (run this FIRST, ~20 min, catches integration crashes I can't hit locally — no jax here).
-NOTE: `-m` is required even for the single smoke run — without multirun the slurm launcher doesn't
-schedule the 4090, it tries to run locally:
+NOTE: `-m` AND `hydra/launcher=slurm` are BOTH required even for the single smoke run. `-m` enables
+multirun; `hydra/launcher=slurm` selects the SlurmLauncher (the config that holds the rtx_4090
+`additional_parameters`). Without the launcher override Hydra falls back to the BasicLauncher and
+errors with `Key 'additional_parameters' not in 'BasicLauncherConf'` (runs locally, no 4090):
 ```
-python train_actsafe.py -m +experiment=safe_goal_tase +hardware=4090_rtx \
+python train_actsafe.py -m hydra/launcher=slurm +experiment=safe_goal_tase +hardware=4090_rtx \
   +wandb.project=actsafe-ct-pointgoal training.epochs=2 training.seed=0
 ```
 Smoke-test checks (the OPEN VERIFICATION items): (b) the (4,64,64)→(3,64,64) image strip runs; (c) the
@@ -465,10 +467,17 @@ THEN the seed-0 grid (key diagnostic = is the dt histogram non-degenerate?). Swe
 max_time_factor first on seed 0 (9 runs), read train/ct/{frac_dt_1,frac_dt_max,std_dt_ratio} to find
 the adaptive cell, THEN spend seeds 1,2 on the winner:
 ```
-python train_actsafe.py -m +experiment=safe_goal_tase +hardware=4090_rtx \
+python train_actsafe.py -m hydra/launcher=slurm +experiment=safe_goal_tase +hardware=4090_rtx \
   +wandb.project=actsafe-ct-pointgoal \
   agent.continuous_time.max_time_factor=4,8,16 \
   agent.continuous_time.switch_cost=0.002,0.01,0.05 training.seed=0
+```
+THEN the OPAX dt-normalization ablation on the winning cell:
+```
+python train_actsafe.py -m hydra/launcher=slurm +experiment=safe_goal_tase +hardware=4090_rtx \
+  +wandb.project=actsafe-ct-pointgoal \
+  agent.continuous_time.opax_dt_normalization=true,false \
+  agent.continuous_time.max_time_factor=8 agent.continuous_time.switch_cost=0.01 training.seed=0,1,2
 ```
 
 - **OPAX dt-normalization ABLATION FLAG ADDED 2026-06-30**: `continuous_time.opax_dt_normalization`
