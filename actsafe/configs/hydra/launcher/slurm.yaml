@@ -17,3 +17,6 @@ setup:
   - 'export MUJOCO_GL=egl'
   - 'export PYOPENGL_PLATFORM=egl'
   - 'export JAX_COMPILATION_CACHE_DIR=/cluster/scratch/${oc.env:USER}/.jax_cache'
+  - 'export XLA_PYTHON_CLIENT_PREALLOCATE=false'
+  - 'export XLA_PYTHON_CLIENT_MEM_FRACTION=0.7'
+  - 'export JAX_TRACEBACK_FILTERING=off'

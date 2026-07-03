@@ -30,8 +30,12 @@ class EpochSummary:
                 costs.append(c)
         # Stack data from all tasks on the first axis,
         # giving a [#tasks, #episodes, #time, ...] shape.
-        stacked_rewards = np.stack(rewards)
-        stacked_costs = np.stack(costs)
+        # Continuous-time (variable-dt) episodes can have different numbers of
+        # transitions, so pad the time axis with zeros before stacking (padding
+        # with zero reward/cost past an episode's own length doesn't change its
+        # sum, which is all _objective/_feasibility use the time axis for).
+        stacked_rewards = _stack_padded(rewards)
+        stacked_costs = _stack_padded(costs)
         return (
             _objective(stacked_rewards),
             _objective(stacked_costs),
@@ -86,17 +90,21 @@ class EpochSummary:
         if not self.continuous_time or self.empty:
             return {}
 
-        all_actions = []
+        pseudo_times, forces = [], []
         for trajectory_batch in self._data:
             for trajectory in trajectory_batch:
                 data = trajectory.as_numpy()
-                # action shape: [batch, time, action_dim]
-                all_actions.append(data.action)
+                # action shape: [batch, time, action_dim]. Episodes can have
+                # different `time` lengths under variable dt, so flatten each
+                # episode's own time axis and pool across episodes instead of
+                # concatenating on a fixed time axis (which requires equal
+                # lengths and is what previously crashed on TASE runs).
+                action = data.action
+                pseudo_times.append(action[..., -1].reshape(-1))
+                forces.append(action[..., :-1].reshape(-1, action.shape[-1] - 1))
 
-        actions = np.concatenate(all_actions, axis=0)  # [episodes, time, action_dim]
-        # Last dimension is pseudo_time, rest is physical force
-        pseudo_time = actions[..., -1]  # [episodes, time]
-        force = actions[..., :-1]  # [episodes, time, force_dim]
+        pseudo_time = np.concatenate(pseudo_times)
+        force = np.concatenate(forces, axis=0)
 
         # Convert pseudo_time to dt_ratio using the same formula as the environment
         time_for_action = ((self.tmax - self.tmin) / 2.0 * pseudo_time) + (self.tmax + self.tmin) / 2.0
@@ -112,6 +120,17 @@ class EpochSummary:
             "train/ct/mean_abs_force": float(np.mean(np.abs(force))),
             "train/ct/std_force": float(np.std(force)),
         }
+
+
+def _stack_padded(arrays: list[npt.NDArray[Any]]) -> npt.NDArray[Any]:
+    max_len = max(a.shape[-1] for a in arrays)
+    if all(a.shape[-1] == max_len for a in arrays):
+        return np.stack(arrays)
+    padded = [
+        np.pad(a, [(0, 0)] * (a.ndim - 1) + [(0, max_len - a.shape[-1])])
+        for a in arrays
+    ]
+    return np.stack(padded)
 
 
 def _objective(rewards: npt.NDArray[Any]) -> float:

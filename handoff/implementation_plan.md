@@ -11,6 +11,74 @@ Companion docs in this `handoff/` folder (mirror of the auto-memory): `MEMORY.md
 
 ---
 
+## TASE "DONE AFTER EPOCH 0" CRASH — ROOT CAUSE FOUND & FIXED (2026-07-03)
+
+**Symptom:** every seed-0 TASE grid cell died right after epoch 0 with no visible exception in the
+submitit `.err`. The AR study (`safe_goal_ar_study`) ran fine on the same cluster/GPU pool, so the
+failure was TASE-specific.
+
+**CONFIRMED ROOT CAUSE (reproduced locally on CPU, full traceback):** a variable-length-episode
+shape bug in `actsafe/rl/epoch_summary.py`. `EpochSummary.metrics` did `np.stack(rewards)` /
+`np.stack(costs)` across all episodes in an epoch, and `continuous_time_metrics` did
+`np.concatenate(all_actions, axis=0)` on a fixed time axis. Both assume **every episode has the same
+number of transitions**. That holds for `ActionRepeat` (fixed `repeat` base steps per decision →
+every episode is exactly `time_limit/repeat` decisions long) but is **violated by TASE**:
+`SwitchCostWrapper` lets the agent choose the hold length (`num_repetitions ∈ [1, max_time_factor]`)
+per decision, so each episode consumes its fixed physical time budget in a variable number of
+decisions — different across the parallel envs and across epochs. The first epoch where two episodes
+differ in length, `np.stack` throws `ValueError: all input arrays must have the same shape`. This is
+called once per epoch in `trainer.py` (`objective, cost_return, feasibilty = summary.metrics`),
+immediately after epoch 0's rollouts — exactly "done after epoch 0". It's a pure numpy logic bug,
+nothing to do with CUDA/XLA/GPU, which is why it reproduces identically on CPU and on the cluster.
+
+Why the `.err` was empty of a *useful* exception: `train_actsafe.py` catches and re-raises, but under
+submitit the traceback lands in the job's stdout/submitit pickle result, not always where you'd look;
+regardless, the confirmed repro makes the forensic guessing moot.
+
+**Fix applied (`epoch_summary.py`):**
+- `metrics`: replaced `np.stack` with `_stack_padded` — zero-pads each episode's reward/cost array on
+  the time axis to the epoch's max length before stacking. Mathematically exact: `_objective` and
+  `_feasibility` only `.sum()` over the time axis, and trailing zeros don't change a sum. `_stack_padded`
+  no-ops back to plain `np.stack` when all lengths already match, so it does not alter AR-study behavior.
+- `continuous_time_metrics`: flatten each episode's own time axis and pool across episodes with
+  `np.concatenate` (instead of stacking on a fixed time axis). The dt_ratio/force stats are means/stds
+  over a pool of scalars, so no padding is involved — no fake values enter the statistics.
+- **These feed only the logging/reporting path** (`logger.log(...)` in `trainer.py`), never the replay
+  buffer or `agent.learn()`. So the fix cannot affect learning or behavior — it only unblocks the
+  per-epoch metric print. Verified locally: a shrunk TASE run (`JAX_PLATFORMS=cpu`, `parallel_envs=4`,
+  real `plan_horizon`/`update_steps`) now clears epoch 0's `summary.metrics` and proceeds into epoch 1
+  actor-critic updates, with healthy diagnostics (`mean_dt_ratio≈8.5`, `frac_dt_1≈0.38`,
+  `mean_abs_force≈0.87` → agent moving, dt varying, not frozen/collapsed).
+
+**Full component audit for the same class of bug (2026-07-03) — all clear, safe to sweep:**
+- `replay_buffer.py` `add`: already length-aware — zero-pads into fixed `max_length` slots, records true
+  `self.lengths`, and samples only within real length. Variable-length is first-class. ✓
+- `acting.py`: per-env trajectories under `active_mask`; early-finishing envs stop appending while others
+  continue, so each env keeps its own length. ✓ (empirically ran clean)
+- `episodic_async_env.py`: `np.asarray` stacks across envs at a single timestep (uniform shape), never
+  across time. ✓
+- `report()` / `metrics.py`: operate on fixed-`sequence_length` replay samples and scalars. ✓
+- `safe_actor_critic.py:240` discount STE `dt_ratio = dt_raw + stop_gradient(round(max(dt_raw,1)) - dt_raw)`
+  is correct; historical Bug A (missing `stop_gradient`) is NOT present. `discounted_cumsum` handles the
+  variable per-step discount via `lax.scan`. ✓
+- `epoch_summary.videos`: reads only `all_vids[-1]` (a single trajectory), so NOT subject to the
+  cross-episode length bug; `render_episodes=0` for the sweep anyway. Left as-is. ✓
+
+**Secondary hygiene change (NOT the root cause):** also restored `XLA_PYTHON_CLIENT_PREALLOCATE=false` /
+`XLA_PYTHON_CLIENT_MEM_FRACTION=0.7` to `slurm.yaml` (dropped incidentally in commit `9b088d8`) and added
+`JAX_TRACEBACK_FILTERING=off`. This is low-risk memory hygiene + a diagnostic aid; it is **not** what
+caused the TASE crash (the AR study ran fine without it). Kept because it's reasonable, not because it
+fixed anything.
+
+**Interactive-debug procedure (for future issues like this):** run locally or on an `srun` shell with
+`JAX_PLATFORMS=cpu JAX_TRACEBACK_FILTERING=off WANDB_MODE=offline` and a shrunk config
+(`training.parallel_envs=4 training.time_limit=200 agent.exploration_steps=1500 training.epochs=2
+training.episodes_per_epoch=1 agent.offline_steps=0`) while keeping the real `plan_horizon`/`update_steps`.
+CPU strips all cuDNN/XLA-autotune noise so pure logic bugs surface with a clean Python traceback in
+seconds, and the shrunk env still exercises the variable-length rollout + epoch-summary path.
+
+---
+
 ## NOTE FOR SUPERVISOR MEETING — reward-discount confound (deferred 2026-06-30)
 
 **Status: known, understood, NOT fixed. Deliberately deferred so it doesn't block TASE.**
