@@ -7,3 +7,4 @@
 - [Interaction Style Feedback](feedback_style.md) — full code audits when debugging, explain math not just settings
 - [Paper Direction](project_paper_direction.md) — novelty concerns, strongest framing, venue calibration; all CT results pre-2026-06-17 are invalid (Bug A)
 - [Strategy 2026-06-23](project_strategy_2026-06-23.md) — DECIDED: pivot to Safety-Gym PointGoal, all-in ICLR 2027; upstream added; discrete path verified faithful; LOAD-BEARING bug: safety cost discounted within macro-window (wrappers.py:191-192)
+- [dt Gradient Trace 2026-07-04](project_dt_gradient_trace_2026-07-04.md) — CORRECTS the 2026-07-03 "Bug A absent" claim: discount stop_gradients were REMOVED (66ea7fe/fd6fe3b), so dt→1 is driven by artifactual discount gradients; safety→dt path is polluted (wrong-signed discount) not severed; cost_return logs discounted not raw physical cost

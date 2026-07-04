@@ -69,12 +69,16 @@ def interact(
                     
                     # Create single-batch transition
                     cost = infos[i].get("cost", 0)
+                    # Raw physical cost of the hold for the reported cost_return; falls back to
+                    # `cost` when the env doesn't split them (discrete ActionRepeat path).
+                    cost_realized = infos[i].get("cost_realized", cost)
                     transition = Transition(
-                        observations[i:i+1], 
-                        next_observations[i:i+1], 
-                        actions[i:i+1], 
-                        np.array([rewards[i]]), 
-                        np.array([cost])
+                        observations[i:i+1],
+                        next_observations[i:i+1],
+                        actions[i:i+1],
+                        np.array([rewards[i]]),
+                        np.array([cost]),
+                        np.array([cost_realized]),
                     )
                     per_env_trajectories[i].transitions.append(transition)
                 

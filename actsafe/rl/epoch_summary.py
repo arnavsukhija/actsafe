@@ -25,9 +25,13 @@ class EpochSummary:
         rewards, costs = [], []
         for trajectory_batch in self._data:
             for trajectory in trajectory_batch:
-                *_, r, c = trajectory.as_numpy()
-                rewards.append(r)
-                costs.append(c)
+                data = trajectory.as_numpy()
+                rewards.append(data.reward)
+                # Report the RAW physical cost (cost_realized) so cost_return / feasibility are
+                # the true undiscounted episode cost, directly comparable to the d budget across
+                # dt choices. In the discrete path cost_realized == cost, so this is unchanged
+                # there; only CT (variable-dt) runs switch from discounted-within-hold to raw.
+                costs.append(data.cost_realized)
         # Stack data from all tasks on the first axis,
         # giving a [#tasks, #episodes, #time, ...] shape.
         # Continuous-time (variable-dt) episodes can have different numbers of

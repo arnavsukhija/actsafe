@@ -11,6 +11,11 @@ class Transition(NamedTuple):
     action: npt.NDArray[Any]
     reward: npt.NDArray[Any]
     cost: npt.NDArray[Any]
+    # Raw undiscounted physical cost of the hold (SwitchCostWrapper's info['cost_realized']).
+    # `cost` is the chunk-invariant discounted-within-hold cost the critic/world-model learn;
+    # `cost_realized` is the physical episode cost reported against the d budget. Optional so the
+    # replay buffer (which reconstructs 5-field TrajectoryData) is unaffected — it stays None there.
+    cost_realized: npt.NDArray[Any] | None = None
 
 
 TrajectoryData = Transition
@@ -29,8 +34,13 @@ class Trajectory:
         # this magic is possible since transition is a named tuple.
         # This allows us make lists of observations, actions, rewards, etc.,
         # instead of list of transitions.
-        o, next_o, a, r, c = zip(*self.transitions)
+        o, next_o, a, r, c, cr = zip(*self.transitions)
         # Stack on axis=1 to keep batch dimension first, and time axis second.
         stack = lambda x: np.stack(x, axis=1)
-        data = TrajectoryData(stack(o), stack(next_o), stack(a), stack(r), stack(c))
+        # cost_realized may be absent (None) for transitions built without it; fall back to
+        # the discounted cost so the reported metric equals the discrete-path cost there.
+        cr_stacked = stack(c) if cr[0] is None else stack(cr)
+        data = TrajectoryData(
+            stack(o), stack(next_o), stack(a), stack(r), stack(c), cr_stacked
+        )
         return data

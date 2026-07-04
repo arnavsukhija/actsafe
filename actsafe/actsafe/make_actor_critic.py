@@ -80,4 +80,7 @@ def make_actor_critic(
         objective_sentiment=objective_sentiment,
         constraint_sentiment=constraint_sentiment,
         actor_entropy_coef=cfg.agent.get("actor_entropy_coef", 0.0),
+        safety_dt_gradient=cfg.agent.get("continuous_time", {}).get(
+            "safety_dt_gradient", True
+        ),
     )
