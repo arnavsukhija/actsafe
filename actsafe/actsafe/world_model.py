@@ -153,8 +153,16 @@ class WorldModel(eqx.Module):
         self.image_decoder = ImageDecoder(state_dim, actual_image_shape, key=image_decoder_key)
         # num_rewards + 1 = cost + reward
         # width = 400, layers = 2
+        # Continuous time (oTaCoS alignment): reward/cost of a hold are transition
+        # quantities r̄(s, u, t) / c̄(s, u, t) — the within-hold accumulation is not
+        # observable from the arrival frame alone (e.g. passing through a hazard
+        # mid-hold), so the decoder is conditioned on the action (incl. the dt dim).
+        # Composed with the duration-conditioned dynamics this gives each ensemble
+        # member a c̄_i(s, u, t), providing imagination a direct learned dt→cost
+        # gradient instead of routing it through the prior/posterior KL.
+        decoder_in_dim = state_dim + (action_dim if continuous_time else 0)
         self.reward_cost_decoder = eqx.nn.MLP(
-            state_dim,
+            decoder_in_dim,
             num_rewards + 1,
             400,
             3,
@@ -190,7 +198,15 @@ class WorldModel(eqx.Module):
             init_state if init_state is not None else self.cell.init,
             (obs_embeddings, actions, keys),
         )
-        reward_cost = jax.vmap(self.reward_cost_decoder)(states.flatten())
+        # Training pairing: states[t] is the posterior that consumed action[t]
+        # (post-hold), so decoding reward/cost of hold t from (state[t], action[t])
+        # matches the imagination-side pairing in sample() exactly.
+        decoder_in = (
+            jnp.concatenate([states.flatten(), actions.astype(states.flatten().dtype)], -1)
+            if self.continuous_time
+            else states.flatten()
+        )
+        reward_cost = jax.vmap(self.reward_cost_decoder)(decoder_in)
         image = jax.vmap(self.image_decoder)(states.flatten())
         return InferenceResult(states, image, reward_cost, posteriors, priors)
 
@@ -245,7 +261,18 @@ class WorldModel(eqx.Module):
         )
 
         # vmap twice: once for the ensemble, and second time for the horizon
-        out = nest_vmap(self.reward_cost_decoder, 2)(ensemble_trajectories.flatten())
+        ensemble_flat = ensemble_trajectories.flatten()
+        if self.continuous_time:
+            # Broadcast actions [T, A] over the ensemble axis [T, E, A] so each
+            # member decodes its own c̄_i(s, u, t) from (arrival latent, action).
+            tiled_actions = jnp.broadcast_to(
+                actions[:, None].astype(ensemble_flat.dtype),
+                ensemble_flat.shape[:2] + actions.shape[-1:],
+            )
+            decoder_in = jnp.concatenate([ensemble_flat, tiled_actions], -1)
+        else:
+            decoder_in = ensemble_flat
+        out = nest_vmap(self.reward_cost_decoder, 2)(decoder_in)
         # Ensemble axis before time axis.
         out, priors = _ensemble_first((out, priors))
         reward, cost = out[..., :-1], out[..., -1]

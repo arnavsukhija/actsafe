@@ -1,4 +1,4 @@
-# ActSafe-CT Implementation Plan (current as of 2026-06-29)
+# ActSafe-CT Implementation Plan (current as of 2026-07-05)
 
 This is the single source of truth for "where we left off." Start here on any new device
 or chat. The historical cartpole investigation is preserved verbatim in **Appendix A** at the
@@ -8,6 +8,58 @@ Companion docs in this `handoff/` folder (mirror of the auto-memory): `MEMORY.md
 `project_strategy_2026-06-23.md` (the decisions), `project_paper_direction.md`,
 `project_bugs_fixed.md`, `project_ct_architecture.md`, `project_cluster_infra.md`,
 `user_profile.md`, `feedback_style.md`.
+
+---
+
+## oTaCoS-ALIGNED ACTION-CONDITIONED DECODER (2026-07-05) — CURRENT FIX UNDER TEST
+
+**Empirical state (wandb `actsafe-ct-pointgoal`, sdg sweep of 2026-07-04, 18 configs × requeue):**
+- `mean_dt` scales cleanly with switch_cost pre-requeue (≈1.2 / 1.9 / 5.5 for sc 0.002/0.01/0.05),
+  then drifts to dt≈1 everywhere by ~4.2M steps. **Verified against the old (no-injection) runs:
+  they ALSO drift to dt≈1–2** (only sc=0.05/mtf=16 held dt≈7), so the `safety_dt_gradient`
+  injection is NOT the cause of the collapse — and dt→1 under persistent infeasibility is locally
+  rational (max reactivity). Earlier "old runs recovered to 2–12" claim was wrong (partial
+  mid-training read).
+- **Load-bearing fact: TASE sits at cost ≈33 (raw) at dt≈1 in BOTH sweeps, vs discrete AR1 ≈15.7.**
+  The safety gap is frequency-independent; base safety learning is the bottleneck, not the dt head.
+
+**Code audit conclusions (verified against source, 2026-07-05):**
+- WM training alignment is correct (`_prepare_features` feeds next_observation; the posterior
+  consumes the dt action + post-hold obs; the decoder targets that hold's cost). No off-by-one in
+  the λ-return / critic pairing: `G[k] = c_k + γ^{dt_k}·G[k+1]` regressed onto s_{k+1} is the
+  standard Dreamer arrival-value convention and is chunk-invariant. The `γ^dt` discount is correct
+  semi-MDP accounting (matches the lab PPO reference) — NOT a bug; stop-gradient ideas are dead.
+- The real structural gap: cost of a hold is a transition quantity c̄(s, u, t), but the decoder
+  read the arrival latent only. Within-hold cost is not observable from the arrival frame (pass
+  through a hazard mid-hold → clean arrival pixels), so imagination's d(cost)/d(dt) had to route
+  through the prior/posterior KL — data-hungry, loses to the exact analytic discount gradient.
+- The `safety_dt_gradient` injection is correct in form (sign/scale/indexing verified) but is zero
+  wherever predicted cost is zero, and LBSGD's infeasible fallback drops the reward gradient (and
+  with it the switch-cost economics) entirely.
+
+**Fix (committed): action-conditioned reward/cost decoder** in `world_model.py`, gated on
+`model.continuous_time` (discrete path byte-identical). Decoder input = concat(latent, action) in
+training (`__call__`) and imagination (`sample`, action broadcast over the ensemble axis). Composed
+with the duration-conditioned dynamics, each member yields c̄_i(s, u, t) — the oTaCoS formulation in
+latent space, preserving ensemble pessimism. Supersedes the injection → run new sweeps with
+`agent.continuous_time.safety_dt_gradient=false`. Pre-launch check on the cluster:
+`pytest tests/test_world_model_action_conditioning.py -v`. NOTE: old pickles cannot resume into the
+new decoder (input dim changed) — fresh runs only.
+
+**Launch plan (overnight 2026-07-05):**
+```bash
+python train_actsafe.py -m hydra/launcher=slurm +experiment=safe_goal_tase +hardware=4090_rtx \
+  +wandb.project=actsafe-ct-pointgoal \
+  agent.continuous_time.max_time_factor=8,16 \
+  agent.continuous_time.switch_cost=0.002,0.01,0.05 \
+  agent.continuous_time.safety_dt_gradient=false training.seed=0,1,2
+```
+Optional diagnostic (localizes the ≈33-vs-15.7 gap: adaptive-training poisoning vs TASE plumbing):
+`agent.continuous_time.max_time_factor=1 agent.continuous_time.switch_cost=0.002 training.seed=0,1,2`.
+
+**Watch for:** dt becoming state-dependent (short near hazards, long in open space) instead of
+globally collapsed; cost at sc=0.01/0.05 approaching the AR-sweep numbers; sc=0.002 staying at
+dt≈1 is fine (switch cost too cheap to matter — not a failure signal).
 
 ---
 
