@@ -16,6 +16,11 @@ class Transition(NamedTuple):
     # `cost_realized` is the physical episode cost reported against the d budget. Optional so the
     # replay buffer (which reconstructs 5-field TrajectoryData) is unaffected — it stays None there.
     cost_realized: npt.NDArray[Any] | None = None
+    # Raw undiscounted task reward of the hold WITHOUT the switch-cost penalty
+    # (SwitchCostWrapper's info['reward_realized']). `reward` is the penalized,
+    # discounted-within-hold reward the agent optimizes; this one measures true
+    # task performance. None on the discrete path (falls back to `reward`).
+    reward_realized: npt.NDArray[Any] | None = None
 
 
 TrajectoryData = Transition
@@ -34,13 +39,15 @@ class Trajectory:
         # this magic is possible since transition is a named tuple.
         # This allows us make lists of observations, actions, rewards, etc.,
         # instead of list of transitions.
-        o, next_o, a, r, c, cr = zip(*self.transitions)
+        o, next_o, a, r, c, cr, rr = zip(*self.transitions)
         # Stack on axis=1 to keep batch dimension first, and time axis second.
         stack = lambda x: np.stack(x, axis=1)
-        # cost_realized may be absent (None) for transitions built without it; fall back to
-        # the discounted cost so the reported metric equals the discrete-path cost there.
+        # cost_realized / reward_realized may be absent (None) for transitions built
+        # without them; fall back to the penalized/discounted values so the reported
+        # metrics equal the discrete-path ones there.
         cr_stacked = stack(c) if cr[0] is None else stack(cr)
+        rr_stacked = stack(r) if rr[0] is None else stack(rr)
         data = TrajectoryData(
-            stack(o), stack(next_o), stack(a), stack(r), stack(c), cr_stacked
+            stack(o), stack(next_o), stack(a), stack(r), stack(c), cr_stacked, rr_stacked
         )
         return data

@@ -72,6 +72,9 @@ def interact(
                     # Raw physical cost of the hold for the reported cost_return; falls back to
                     # `cost` when the env doesn't split them (discrete ActionRepeat path).
                     cost_realized = infos[i].get("cost_realized", cost)
+                    # Raw task reward without the switch-cost penalty for the reported
+                    # objective_raw; falls back to the penalized reward on discrete envs.
+                    reward_realized = infos[i].get("reward_realized", rewards[i])
                     transition = Transition(
                         observations[i:i+1],
                         next_observations[i:i+1],
@@ -79,6 +82,7 @@ def interact(
                         np.array([rewards[i]]),
                         np.array([cost]),
                         np.array([cost_realized]),
+                        np.array([reward_realized]),
                     )
                     per_env_trajectories[i].transitions.append(transition)
                 

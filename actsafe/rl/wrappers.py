@@ -187,6 +187,7 @@ class SwitchCostWrapper(Wrapper):
         done = False
         truncated = False
         total_reward = 0.0
+        total_reward_realized = 0.0
         total_cost = 0.0
         total_cost_realized = 0.0
         current_step = 0
@@ -202,6 +203,7 @@ class SwitchCostWrapper(Wrapper):
             # cost summed separately for the d=25 metric. See handoff for the derivation.
             step_cost = step_info.get('cost', 0.0)
             total_reward += (self.discounting ** current_step) * reward
+            total_reward_realized += reward
             total_cost += (self.cost_discounting ** current_step) * step_cost
             total_cost_realized += step_cost
             
@@ -231,7 +233,10 @@ class SwitchCostWrapper(Wrapper):
         
         info['steps'] = current_step
         info['cost'] = total_cost                    # discounted-within-hold -> critic
-        info['cost_realized'] = total_cost_realized  # raw physical sum -> d=25 metric (TODO: wire to log)
+        info['cost_realized'] = total_cost_realized  # raw physical sum -> d=25 metric
+        # Raw undiscounted task reward, WITHOUT the switch-cost penalty: the true task
+        # performance metric. `reward` (returned below) is what the agent optimizes.
+        info['reward_realized'] = total_reward_realized
         info['dt'] = time_for_action
         info['intermediate_states'] = intermediate_states
         

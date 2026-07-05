@@ -143,7 +143,7 @@ class Trainer:
             summary, wall_time, steps = self._run_training_epoch(
                 self.config.training.episodes_per_epoch
             )
-            objective, cost_return, feasibilty = summary.metrics
+            objective, objective_raw, cost_return, feasibilty = summary.metrics
             if isinstance(objective, np.ndarray):
                 metrics = {
                     f"train/objective_{i}": val for i, val in enumerate(objective)
@@ -151,6 +151,9 @@ class Trainer:
             else:
                 metrics = {"train/objective": objective}
             metrics |= {
+                # Raw task reward without the switch-cost penalty (== objective on
+                # discrete envs): true task performance, comparable across switch_cost.
+                "train/objective_raw": float(np.mean(objective_raw)),
                 "train/cost_return": cost_return,
                 "train/feasibility": feasibilty,
                 "train/fps": steps / wall_time,

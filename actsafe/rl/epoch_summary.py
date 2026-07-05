@@ -21,12 +21,16 @@ class EpochSummary:
         return len(self._data) == 0
 
     @property
-    def metrics(self) -> Tuple[float, float, float]:
-        rewards, costs = [], []
+    def metrics(self) -> Tuple[float, float, float, float]:
+        rewards, raw_rewards, costs = [], [], []
         for trajectory_batch in self._data:
             for trajectory in trajectory_batch:
                 data = trajectory.as_numpy()
                 rewards.append(data.reward)
+                # Raw undiscounted task reward WITHOUT the switch-cost penalty: true task
+                # performance, comparable across switch_cost settings. `reward` above is
+                # the penalized objective the agent optimizes. Identical on the discrete path.
+                raw_rewards.append(data.reward_realized)
                 # Report the RAW physical cost (cost_realized) so cost_return / feasibility are
                 # the true undiscounted episode cost, directly comparable to the d budget across
                 # dt choices. In the discrete path cost_realized == cost, so this is unchanged
@@ -39,9 +43,11 @@ class EpochSummary:
         # with zero reward/cost past an episode's own length doesn't change its
         # sum, which is all _objective/_feasibility use the time axis for).
         stacked_rewards = _stack_padded(rewards)
+        stacked_raw_rewards = _stack_padded(raw_rewards)
         stacked_costs = _stack_padded(costs)
         return (
             _objective(stacked_rewards),
+            _objective(stacked_raw_rewards),
             _objective(stacked_costs),
             _feasibility(stacked_costs, self.cost_boundary),
         )
