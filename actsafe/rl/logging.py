@@ -266,9 +266,16 @@ class StateWriter:
     def _worker(self):
         while not self.queue.empty():
             state_bytes = self.queue.get(timeout=1)
-            with open(os.path.join(self.log_dir, self.state_filename), "wb") as f:
+            # Write to a tmp file and atomically rename so a SIGKILL mid-write
+            # (e.g. slurm requeue) can never truncate the previous checkpoint.
+            path = os.path.join(self.log_dir, self.state_filename)
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "wb") as f:
                 f.write(state_bytes)
-                self.queue.task_done()
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            self.queue.task_done()
 
     def close(self):
         self.queue.join()
