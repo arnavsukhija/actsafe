@@ -38,10 +38,19 @@ class OpaxExploration(Exploration):
         action_dim: int,
         key: jax.Array,
     ):
+        ct_cfg = config.agent.get("continuous_time", {})
+        self.continuous_time = ct_cfg.get("enabled", False)
+        # CT: agent state = (latent, elapsed-time fraction) -> +1 input dim
+        # (must match the task actor-critic and WorldModel.sample()).
+        state_dim = (
+            config.agent.model.stochastic_size
+            + config.agent.model.deterministic_size
+            + (1 if self.continuous_time else 0)
+        )
         self.actor_critic = make_actor_critic(
             config,
             config.training.safe,
-            config.agent.model.stochastic_size + config.agent.model.deterministic_size,
+            state_dim,
             action_dim,
             key,
             objective_sentiment=identity,
@@ -51,8 +60,6 @@ class OpaxExploration(Exploration):
         )
         self.reward_scale = config.agent.exploration_reward_scale
         self.epistemic_scale = config.agent.exploration_epistemic_scale
-        ct_cfg = config.agent.get("continuous_time", {})
-        self.continuous_time = ct_cfg.get("enabled", False)
         self.k_min = ct_cfg.get("min_repeat", 1) if self.continuous_time else None
         self.k_max = ct_cfg.get("max_repeat", None) if self.continuous_time else None
         # Default OFF: dividing the bonus by dt is not part of vanilla OPAX and the

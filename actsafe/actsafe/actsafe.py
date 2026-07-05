@@ -29,7 +29,13 @@ def policy(policy_fn, model, prev_state, observation, key):
         current_rssm_state = model.infer_state(
             prev_state.rssm_state, observation, prev_state.prev_action, model_key
         )
-        action = policy_fn(current_rssm_state.flatten(), policy_key)
+        flat = current_rssm_state.flatten()
+        if model.continuous_time:
+            # Agent state = (latent, elapsed-time fraction). The clock channel is
+            # spatially constant; preprocess maps its 255*frac value to frac - 0.5.
+            time_fraction = observation[-1, 0, 0] + 0.5
+            flat = jnp.concatenate([flat, time_fraction[None].astype(flat.dtype)])
+        action = policy_fn(flat, policy_key)
         return action, AgentState(current_rssm_state, action)
 
     observation = preprocess(observation)
@@ -75,6 +81,8 @@ class ActSafe:
         self.prng = PRNGSequence(config.training.seed)
         action_dim = int(np.prod(action_space.shape))
         assert len(observation_space.shape) == 3
+        ct_cfg = config.agent.get("continuous_time", {})
+        ct_enabled = ct_cfg.get("enabled", False)
         self.model = WorldModel(
             image_shape=observation_space.shape,
             action_dim=action_dim,
@@ -82,13 +90,23 @@ class ActSafe:
             ensemble_size=config.agent.sentiment.ensemble_size,
             initialization_scale=config.agent.sentiment.model_initialization_scale,
             num_rewards=num_rewards,
+            k_min=float(ct_cfg.get("min_repeat", 1)) if ct_enabled else 1.0,
+            k_max=float(ct_cfg.get("max_repeat", 1)) if ct_enabled else 1.0,
+            horizon_steps=float(config.training.time_limit) if ct_enabled else 1.0,
             **config.agent.model,
         )
         self.model_learner = Learner(self.model, config.agent.model_optimizer)
+        # CT: agent state = (latent, elapsed-time fraction) -> +1 input dim for
+        # the actor and both critics (full-MDP time under episode truncation).
+        state_dim = (
+            config.agent.model.stochastic_size
+            + config.agent.model.deterministic_size
+            + (1 if ct_enabled else 0)
+        )
         self.actor_critic = make_actor_critic(
             config,
             config.training.safe,
-            config.agent.model.stochastic_size + config.agent.model.deterministic_size,
+            state_dim,
             action_dim,
             next(self.prng),
             make_sentiment(self.config.agent.sentiment.objective_optimism),
@@ -120,7 +138,6 @@ class ActSafe:
         # multi-dt contrasts exist in the buffer even if the policy's dt collapses.
         # Applies only to real-environment rollouts (this class only acts in the
         # real env); imagination and all loss formulations are untouched.
-        ct_cfg = config.agent.get("continuous_time", {})
         self._dt_exploration_uniform = bool(
             ct_cfg.get("enabled", False)
             and ct_cfg.get("dt_exploration", "policy") == "uniform"
@@ -279,7 +296,17 @@ class ActSafe:
             rest["reconstruction_loss"].mean()
         )
         self.metrics_monitor["agent/model/kl"] = float(rest["kl_loss"].mean())
-        return rest["states"].flatten()
+        flat_states = rest["states"].flatten()
+        if self.model.continuous_time:
+            # Arrival-time fraction of each posterior state, read from the clock
+            # channel of the same (batch, step) positions (preprocess maps the
+            # 255*frac channel to frac - 0.5); imagination rollouts start from
+            # (latent, time) so the critics see episode time consistently.
+            time_fraction = features.observation[:, :, -1, 0, 0] + 0.5
+            flat_states = jnp.concatenate(
+                [flat_states, time_fraction[..., None].astype(flat_states.dtype)], -1
+            )
+        return flat_states
 
     def report(self, summary: EpochSummary, epoch: int, step: int) -> Report:
         metrics = {

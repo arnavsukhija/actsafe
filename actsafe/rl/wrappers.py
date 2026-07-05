@@ -143,13 +143,14 @@ class SwitchCostWrapper(Wrapper):
         obs_space = self.env.observation_space
         act_space = self.env.action_space
         if isinstance(obs_space, Box):
+            # The appended clock channel is 255 * elapsed/horizon in [0, 255].
             if len(obs_space.shape) == 1:
                 low = np.append(obs_space.low, 0.0)
-                high = np.append(obs_space.high, np.inf)
+                high = np.append(obs_space.high, 255.0)
                 self.observation_space = Box(low=low, high=high, dtype=obs_space.dtype)
             elif len(obs_space.shape) == 3:
                 low = np.concatenate([obs_space.low, np.zeros_like(obs_space.low[:1])], axis=0)
-                high = np.concatenate([obs_space.high, np.full_like(obs_space.high[:1], np.inf)], axis=0)
+                high = np.concatenate([obs_space.high, np.full_like(obs_space.high[:1], 255.0)], axis=0)
                 self.observation_space = Box(low=low, high=high, dtype=obs_space.dtype)
             
         if isinstance(act_space, Box):
@@ -167,11 +168,14 @@ class SwitchCostWrapper(Wrapper):
         return self._augment_observation(obs), info
 
     def _augment_observation(self, obs: np.ndarray) -> np.ndarray:
+        # The clock is stored as 255 * elapsed/horizon so it survives the replay
+        # buffer's uint8 storage like a pixel channel (raw step counts overflow
+        # uint8; raw fractions quantize to ~3 values). Consumers recover the
+        # fraction as channel/255 (i.e. +0.5 after the standard preprocess).
+        clock = 255.0 * self.steps_elapsed / self.step_horizon
         if len(obs.shape) == 1:
-            return np.concatenate(
-                [obs, np.array([self.steps_elapsed], dtype=obs.dtype)]
-            )
-        time_channel = np.full_like(obs[:1], self.steps_elapsed)
+            return np.concatenate([obs, np.array([clock], dtype=obs.dtype)])
+        time_channel = np.full_like(obs[:1], clock)
         return np.concatenate([obs, time_channel], axis=0)
 
     def step(self, action) -> Tuple[np.ndarray, float, bool, bool, dict]:

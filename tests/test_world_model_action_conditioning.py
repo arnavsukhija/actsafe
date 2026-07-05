@@ -23,8 +23,14 @@ BATCH = 2
 ENSEMBLE = 5
 
 
-def make_model(continuous_time: bool) -> WorldModel:
-    # CT observations carry an extra time_to_go channel that the encoder strips.
+def make_model(
+    continuous_time: bool,
+    k_min: float = 1.0,
+    k_max: float = 1.0,
+    horizon_steps: float = 1.0,
+) -> WorldModel:
+    # CT observations carry an extra elapsed-time clock channel that the CNN
+    # skips (it re-enters the agent state as an exact scalar).
     channels = 4 if continuous_time else 3
     return WorldModel(
         image_shape=(channels, 64, 64),
@@ -36,6 +42,9 @@ def make_model(continuous_time: bool) -> WorldModel:
         initialization_scale=1.0,
         num_rewards=1,
         continuous_time=continuous_time,
+        k_min=k_min,
+        k_max=k_max,
+        horizon_steps=horizon_steps,
         key=jax.random.PRNGKey(0),
     )
 
@@ -66,6 +75,38 @@ def test_training_and_imagination_shapes(continuous_time):
     # Imagination with a raw action array (evaluate_model path).
     prediction, _ = model.sample(7, model.cell.init, key, jnp.zeros((7, ACTION_DIM)))
     assert prediction.cost.shape == (ENSEMBLE, 7)
+
+
+def test_imagination_time_recurrence_matches_wrapper():
+    from actsafe.rl import ct_time
+
+    horizon_steps = 100.0
+    model = make_model(True, k_min=1.0, k_max=16.0, horizon_steps=horizon_steps)
+    key = jax.random.PRNGKey(3)
+
+    holds = [3, 7, 16, 1, 5]
+    # k + 0.5 floors to exactly k under the shared affine map.
+    pseudos = [ct_time.pseudo_from_dt_ratio(k + 0.5, 1.0, 16.0) for k in holds]
+    actions = jnp.zeros((len(holds), ACTION_DIM)).at[:, -1].set(jnp.asarray(pseudos))
+
+    prediction, _ = model.sample(
+        len(holds), model.cell.init, key, actions, initial_time=jnp.asarray(0.1)
+    )
+    times = prediction.next_state[:, -1]
+    expected = 0.1 + jnp.cumsum(jnp.asarray(holds, jnp.float32)) / horizon_steps
+    assert jnp.allclose(times, jnp.minimum(expected, 1.0), atol=1e-6)
+
+
+def test_flat_initial_state_roundtrips_time():
+    model = make_model(True, k_min=1.0, k_max=16.0, horizon_steps=100.0)
+    key = jax.random.PRNGKey(4)
+    state_dim = 32 + 8
+    flat = jnp.zeros((state_dim + 1,)).at[-1].set(0.25)
+    policy = lambda state, k: jnp.zeros((ACTION_DIM,))
+    prediction, _ = model.sample(4, flat, key, policy)
+    # dt head 0 -> affine(0) in [1,16] is 8.5 -> floor 8 -> +0.08 per step.
+    expected = 0.25 + 0.08 * jnp.arange(1, 5, dtype=jnp.float32)
+    assert jnp.allclose(prediction.next_state[:, -1], expected, atol=1e-6)
 
 
 def test_imagined_cost_has_direct_dt_gradient():

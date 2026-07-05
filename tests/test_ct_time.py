@@ -76,7 +76,8 @@ def test_wrapper_executes_requested_repeats_and_counts_up():
     obs, reward, done, truncated, info = env.step(np.array([0.0, 0.0, pseudo]))
     assert info["steps"] == 7
     assert base.base_steps == 7
-    assert obs[-1] == 7.0  # clock counts up by executed steps
+    # Clock channel = 255 * elapsed/horizon (uint8-safe fraction encoding).
+    assert obs[-1] == pytest.approx(255.0 * 7 / 100)
     assert reward == pytest.approx(7.0)  # undiscounted sum, zero switch cost
     assert info["cost_realized"] == pytest.approx(3.5)
     assert not (done or truncated)
@@ -110,5 +111,6 @@ def test_wrapper_clock_advances_by_executed_steps_on_early_truncation():
     env.reset()
     obs, _, _, truncated, info = env.step(np.array([0.0, 0.0, 1.0]))  # request 16
     assert info["steps"] == 5  # only 5 executed
-    assert obs[-1] == 5.0  # clock reflects EXECUTED steps, not the request
+    # Clock reflects EXECUTED steps (5), not the request (16).
+    assert obs[-1] == pytest.approx(255.0 * 5 / 100)
     assert truncated

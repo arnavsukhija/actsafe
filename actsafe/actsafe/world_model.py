@@ -9,6 +9,7 @@ from optax import OptState
 from actsafe.common.learner import Learner
 from actsafe.common.mixed_precision import apply_mixed_precision
 from actsafe.actsafe.rssm import RSSM, Features, ShiftScale, State
+from actsafe.rl import ct_time
 from actsafe.rl.types import Prediction
 from actsafe.actsafe.utils import marginalize_prediction
 from actsafe.rl.types import Policy
@@ -112,6 +113,11 @@ class WorldModel(eqx.Module):
     image_decoder: ImageDecoder
     reward_cost_decoder: eqx.nn.MLP
     continuous_time: bool = eqx.field(static=True)
+    # CT: hold bounds (repeat units) and episode horizon (base steps) for the
+    # exact elapsed-time recurrence in imagination; unused when discrete.
+    k_min: float = eqx.field(static=True)
+    k_max: float = eqx.field(static=True)
+    horizon_steps: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -124,6 +130,9 @@ class WorldModel(eqx.Module):
         initialization_scale: float,
         num_rewards: int,
         continuous_time: bool = False,
+        k_min: float = 1.0,
+        k_max: float = 1.0,
+        horizon_steps: float = 1.0,
         *,
         key,
     ):
@@ -133,9 +142,17 @@ class WorldModel(eqx.Module):
             image_decoder_key,
             reward_cost_decoder_key,
         ) = jax.random.split(key, 4)
-        # structure and must NOT be encoded by the CNN or reconstructed by the
-        # Strip it here so Encoder and ImageDecoder only see the C real image channels.
+        # Full-MDP time handling (CT): the elapsed-time clock channel appended by
+        # SwitchCostWrapper is a spatially-constant scalar, so it is kept OUT of
+        # the CNNs (encoder input and image-decoder output see only the C real
+        # pixel channels). The clock still reaches the agent: it is carried as an
+        # exact scalar ALONGSIDE the latent (extracted from the channel on real
+        # steps, advanced analytically by the executed hold length in
+        # imagination) — time is bookkeeping, not something to learn.
         self.continuous_time = continuous_time
+        self.k_min = float(k_min)
+        self.k_max = float(k_max)
+        self.horizon_steps = float(horizon_steps)
         image_channels = image_shape[0] - 1 if continuous_time else image_shape[0]
         actual_image_shape = (image_channels,) + image_shape[1:]
         self.cell = RSSM(
@@ -177,10 +194,10 @@ class WorldModel(eqx.Module):
         key: jax.Array,
         init_state: State | None = None,
     ) -> InferenceResult:
-        # Strip the time_to_go channel (last channel) added by SwitchCostWrapper.
-        # Time encodes remaining episode horizon as a scalar broadcast to a full
-        # image channel — it has no spatial structure and should not be encoded
-        # by the CNN or reconstructed by the image decoder.
+        # Keep the CNN on real pixels: the elapsed-time clock channel (last
+        # channel, added by SwitchCostWrapper) has no spatial structure. It is
+        # NOT dropped from the agent — callers read it back as the scalar time
+        # component of the agent state (see ActSafe.update_model / policy).
         obs = features.observation[:, :-1] if self.continuous_time else features.observation
         obs_embeddings = jax.vmap(self.encoder)(obs)
 
@@ -217,7 +234,8 @@ class WorldModel(eqx.Module):
         action: jax.Array,
         key: jax.Array,
     ) -> State:
-        # Strip the time_to_go channel before encoding (same as in __call__).
+        # Keep the CNN on real pixels (same as in __call__); the caller reads the
+        # clock channel back as the scalar time component of the agent state.
         obs = observation[:-1] if self.continuous_time else observation
         obs_embeddings = self.encoder(obs)
         state, *_ = self.cell.filter(state, obs_embeddings, action, key)
@@ -229,20 +247,34 @@ class WorldModel(eqx.Module):
         initial_state: State | jax.Array,
         key: jax.Array,
         policy: Policy,
+        initial_time: jax.Array | None = None,
     ) -> tuple[Prediction, ShiftScale]:
         def f(carry, inputs):
-            prev_state = carry
+            prev_state, prev_time = carry
             if callable(policy):
                 key = inputs
                 key, p_key = jax.random.split(key)
-                action = policy(jax.lax.stop_gradient(prev_state.flatten()), p_key)
+                flat = prev_state.flatten()
+                if self.continuous_time:
+                    flat = jnp.concatenate([flat, prev_time[None].astype(flat.dtype)])
+                action = policy(jax.lax.stop_gradient(flat), p_key)
             else:
                 action, key = inputs
             ensemble_states, prior = self.cell.predict(prev_state, action, key)
             key, prior_key = jax.random.split(key)
             id = jax.random.randint(prior_key, (), 0, self.cell.ensemble_size)
             state = jax.tree_map(lambda x: x[id], ensemble_states)
-            return state, (action, state, ensemble_states, prior)
+            if self.continuous_time:
+                # Exact bookkeeping, matching SwitchCostWrapper: the clock
+                # advances by the executed hold length as a fraction of the
+                # episode horizon. Nothing is learned here.
+                k = ct_time.dt_ratio_from_pseudo_jnp(
+                    action[-1], self.k_min, self.k_max
+                )
+                time = jnp.minimum(prev_time + k / self.horizon_steps, 1.0)
+            else:
+                time = prev_time
+            return (state, time), (action, state, time, ensemble_states, prior)
 
         if isinstance(policy, jax.Array):
             inputs: tuple[jax.Array, jax.Array] | jax.Array = (
@@ -255,9 +287,16 @@ class WorldModel(eqx.Module):
         else:
             raise ValueError("policy must be callable or jax.Array")
         if isinstance(initial_state, jax.Array):
+            if self.continuous_time:
+                # Flat agent states carry the elapsed-time fraction as last dim.
+                initial_time = initial_state[..., -1]
+                initial_state = initial_state[..., :-1]
             initial_state = State.from_flat(initial_state, self.cell.stochastic_size)
-        _, (actions, trajectory, ensemble_trajectories, priors) = jax.lax.scan(
-            f, initial_state, inputs
+        if initial_time is None:
+            initial_time = jnp.asarray(0.0, jnp.float32)
+        initial_time = jnp.asarray(initial_time, jnp.float32)
+        _, (actions, trajectory, times, ensemble_trajectories, priors) = jax.lax.scan(
+            f, (initial_state, initial_time), inputs
         )
 
         # vmap twice: once for the ensemble, and second time for the horizon
@@ -276,7 +315,14 @@ class WorldModel(eqx.Module):
         # Ensemble axis before time axis.
         out, priors = _ensemble_first((out, priors))
         reward, cost = out[..., :-1], out[..., -1]
-        out = Prediction(actions, trajectory.flatten(), reward, cost)
+        next_state = trajectory.flatten()
+        if self.continuous_time:
+            # Agent state = (latent, elapsed-time fraction): critics and the
+            # actor see the arrival time of each imagined hold.
+            next_state = jnp.concatenate(
+                [next_state, times[:, None].astype(next_state.dtype)], -1
+            )
+        out = Prediction(actions, next_state, reward, cost)
         return out, priors
 
 
@@ -328,8 +374,8 @@ def variational_step(
             reward_cost,
             jnp.concatenate([reward, features.cost[..., None]], -1),
         )
-        # Strip the time_to_go channel from the reconstruction target so the
-        # image decoder is only trained to reconstruct real image pixels.
+        # The image decoder is only trained to reconstruct real image pixels;
+        # the clock channel is exact bookkeeping and never learned.
         target_obs = features.observation[:, :, :-1] if model.continuous_time else features.observation
         image_logprobs = logprobs(inference_result.image, target_obs)
         reconstruction_loss = -reward_cost_logprobs - image_logprobs
@@ -380,14 +426,26 @@ def evaluate_model(
     features = jax.tree_map(lambda x: x[0, :conditioning_length], features)
     inference_result = model(features, actions[0, :conditioning_length], subkey)
     state = jax.tree_map(lambda x: x[-1], inference_result.state)
+    if model.continuous_time:
+        # Elapsed-time fraction at the end of conditioning (preprocess maps the
+        # 255*frac clock channel to frac - 0.5).
+        initial_time = features.observation[-1, -1, 0, 0] + 0.5
+    else:
+        initial_time = None
     prediction, _ = model.sample(
         length - conditioning_length,
         state,
         key,
         actions[0, conditioning_length:],
+        initial_time=initial_time,
     )
     prediction = marginalize_prediction(prediction)
-    y_hat = jax.vmap(model.image_decoder)(prediction.next_state)
+    latent = (
+        prediction.next_state[..., :-1]
+        if model.continuous_time
+        else prediction.next_state
+    )
+    y_hat = jax.vmap(model.image_decoder)(latent)
     y = observations[0, conditioning_length:]
     # Strip time channel from ground-truth for comparison with decoded images.
     if model.continuous_time:
