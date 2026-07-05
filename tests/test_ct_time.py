@@ -37,6 +37,26 @@ def test_pseudo_roundtrip():
         assert int(ct_time.dt_ratio_from_pseudo(pseudo, 1.0, 16.0)) == k
 
 
+def test_buffer_dt_coverage_metrics():
+    k_min, k_max = 1.0, 16.0
+    holds_ep0 = [1, 1, 8, 16]
+    holds_ep1 = [2, 4]
+    pseudo = np.zeros((3, 4))
+    pseudo[0, :] = [ct_time.pseudo_from_dt_ratio(k + 0.5, k_min, k_max) for k in holds_ep0]
+    pseudo[1, :2] = [ct_time.pseudo_from_dt_ratio(k + 0.5, k_min, k_max) for k in holds_ep1]
+    cost = np.zeros((3, 4))
+    cost[0, 2] = 1.0  # hazard at decision 2 of episode 0
+    lengths = np.array([4, 2, 0])  # episode 2 is an empty slot
+
+    m = ct_time.buffer_dt_coverage(pseudo, cost, lengths, k_min, k_max)
+    assert m["train/ct/buffer/mean_dt"] == pytest.approx(np.mean([1, 1, 8, 16, 2, 4]))
+    assert m["train/ct/buffer/frac_dt_1"] == pytest.approx(2 / 6)
+    assert m["train/ct/buffer/frac_dt_max"] == pytest.approx(1 / 6)
+    # Near-hazard (<=1 decision away) in episode 0: decisions 1..3 -> dts {1, 8, 16}.
+    assert m["train/ct/buffer/near_hazard_count"] == 3.0
+    assert m["train/ct/buffer/near_hazard_distinct_dt"] == 3.0
+
+
 class _CountingEnv(gymnasium.Env):
     """Deterministic stub: reward 1 and cost 0.5 per base step, never terminates."""
 

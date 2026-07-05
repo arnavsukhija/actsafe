@@ -15,6 +15,7 @@ from actsafe.actsafe.multi_reward import MultiRewardBridge
 from actsafe.actsafe.replay_buffer import ReplayBuffer
 from actsafe.actsafe.sentiment import make_sentiment
 from actsafe.actsafe.world_model import WorldModel, evaluate_model, variational_step
+from actsafe.rl import ct_time
 from actsafe.rl.epoch_summary import EpochSummary
 from actsafe.rl.metrics import MetricsMonitor
 from actsafe.rl.trajectory import TrajectoryData, Transition
@@ -313,6 +314,20 @@ class ActSafe:
             k: float(v.result.mean) for k, v in self.metrics_monitor.metrics.items()
         }
         self.metrics_monitor.reset()
+        if self.model.continuous_time and not self.replay_buffer.empty:
+            # Buffer dt-coverage (train/ct/buffer/*): does the world model's
+            # training data contain multi-dt contrast, especially near hazards?
+            # Cheap: uses only the small action/cost/length arrays, never the
+            # observation array.
+            metrics.update(
+                ct_time.buffer_dt_coverage(
+                    self.replay_buffer.action[..., -1],
+                    self.replay_buffer.cost,
+                    self.replay_buffer.lengths,
+                    self.actor_critic.k_min,
+                    self.actor_critic.k_max,
+                )
+            )
         if self.config.agent.evaluate_model:
             batch = next(self.replay_buffer.sample(1))
             features, actions = _prepare_features(batch)

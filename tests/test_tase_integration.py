@@ -107,3 +107,10 @@ def test_tase_agent_end_to_end_smoke():
     assert "agent/model/loss" in metrics
     assert any("/opax/" in k for k in metrics), sorted(metrics)
     assert np.isfinite(metrics["agent/model/loss"])
+
+    # report() must include the buffer dt-coverage diagnostics.
+    from actsafe.rl.epoch_summary import EpochSummary
+
+    report = agent.report(EpochSummary(), epoch=0, step=64)
+    assert "train/ct/buffer/mean_dt" in report.metrics
+    assert report.metrics["train/ct/buffer/frac_dt_1"] <= 1.0
