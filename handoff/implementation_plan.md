@@ -11,6 +11,71 @@ Companion docs in this `handoff/` folder (mirror of the auto-memory): `MEMORY.md
 
 ---
 
+## SWEEPS COMPLETE — FULL EMPIRICAL AUDIT (2026-07-05, afternoon) — CURRENT STATE OF KNOWLEDGE
+
+Both 5M-step sweeps **finished this morning** (sdg=True lineages ended ~2026-07-04 23:14Z batch,
+sdg=False ~07-05 07:48Z batch; the 07:16Z "runs" are zombie resumes of completed jobs that logged
+nothing). Nothing is currently running. A per-run wandb scan of all 178 CT runs
+(`scan of train/ct/{mean,std}_dt_ratio per process lifetime`) plus a full-lineage metric pull
+established:
+
+**1. The collapse taxonomy is now airtight.** Every *fresh* process shows: healthy dt → genuine
+OPAX-phase dt→1 at ~250k–500k (recovers at 500k; absent with `opax_dt_normalization=false`) →
+switch-cost-scaled task-phase dt. Every *resumed* process is dt≡1/std≡0 from its first log — 100%
+of 6 resume batches, including step ranges where fresh processes show mean dt 7–14. "Collapse
+before the requeue" observations are the (real, recovering) OPAX window, not a task-phase failure.
+
+**2. `safety_dt_gradient` A/B: no meaningful difference — but it was CONFOUNDED.** The sdg=True
+sweep (launched 07-04 15:06Z, commit 7948ca0) predates the action-conditioned decoder; the
+sdg=False sweep (23:46Z, d9f7b49) has it. Final cost_return (mean±std over 3 seeds):
+sc=0.002: 26–29 (False) vs 24–26 (True); sc=0.01: 36–38 vs 31–36; sc=0.05: 34–45 vs 36–39.
+So "injection, no decoder" ≈ "decoder, no injection" on safety. Neither actor-gradient mechanism
+moves the needle, which points away from gradient wiring and at the estimate being optimized.
+
+**3. THE key safety finding: the constraint estimate is optimistic everywhere.**
+`agent/safety_critic/constraint` (budget 2.5 − V_c) over the last 1M steps is **positive in every
+single lineage** (0.39–0.74) with frac>0 = 1.00 — the agent believes it is ~20% under budget
+100% of the time — while realized cost_return is 25–55 (up to 120% over). LBSGD and the CT budget
+math (verified: d/(T·(1−γ_s)) = 2.5, chunk-invariant) are working as designed on a wrong estimate.
+**The bottleneck is model/critic cost underestimation, not enforcement.**
+
+**4. Scale of the problem:** violation grows with switch_cost (⇒ hold length): sc=0.002 ≈25–29
+(feas ~0.6), sc=0.01 ≈31–38 (~0.4), sc=0.05 ≈34–45 (~0.36). Reference discrete AR study
+(same project, non-CT runs): AR=1 ≈10–20 (feas 0.7–0.95), AR=4 ≈20–25, AR=8/16 ≈25–30 with heavy
+seed variance. So (a) coarse control is genuinely harder to keep safe even in discrete-land, and
+(b) TASE carries an additional ≈+10 cost offset over matched-frequency discrete AR. The
+hold-length-scaling part is exactly what a dt-conditioned cost underestimate (coverage gap)
+predicts; the constant offset needs the within-window discounting-leak audit / pessimism check.
+
+**5. Objective logging fixed (commit a5a9674):** `train/objective` bakes in −switch_cost per
+decision (and within-hold discounting); `train/objective_raw` now logs the undiscounted task
+reward without the penalty (via `info['reward_realized']`, plumbed like `cost_realized`), so task
+performance is comparable across switch_cost. Note completed sweeps only have the penalized one.
+
+**Fix-stack triage (what is necessary vs. superseded):**
+- KEEP (formulation/infra, artifact-independent): action-conditioned decoder (oTaCoS c̄(s,u,t)),
+  discount STE, CT budget accounting, opax_dt_normalization flag, variable-length episode
+  handling, resume-config fix, cost_realized/reward_realized reporting, dt_exploration=uniform.
+- SUPERSEDED: `safety_dt_gradient` injection — a first-order surrogate for the d(cost)/d(dt) the
+  decoder provides naturally; empirically indistinguishable arms. Default false going forward;
+  keep the flag only as a paper ablation.
+- DEAD: `dt_init_stddev` suggestion (never enabled, motivated by the phantom collapse).
+
+**Decision & next actions (2026-07-05):**
+1. **Run `scripts/diagnose_dt_coverage.py <run>/state.pkl --two-curve 8` on the completed 5M
+   checkpoints NOW** (e.g. sc=0.05/mtf=16 and sc=0.002/mtf=8, one seed each): this is the Step-1
+   coverage verification + the "before" two-curve baseline, on real data, at zero compute cost.
+2. Relaunch ONE grid fresh on commit a5a9674 (decoder + dt_exploration=uniform + telemetry fix +
+   objective_raw): `safety_dt_gradient=false`, same grid as before. This is the "after" arm.
+   Optionally add sdg=true on the same commit for a clean (unconfounded) flag ablation.
+3. After ~1M steps re-run the diagnostic (Step 3): if coverage is fixed and the two-curve mean is
+   still dt-flat → decoder/training is the suspect; if dt-sensitive but violation persists →
+   audit the within-window cost-discounting leak and consider raising `constraint_pessimism`.
+4. Do NOT iterate on actor-loss mechanisms until #3 says the model's cost estimate is trustworthy —
+   finding 3 says the actor is faithfully optimizing a wrong constraint.
+
+---
+
 ## THE "dt COLLAPSE" WAS A RESUME LOGGING ARTIFACT (2026-07-05) — READ BEFORE TRUSTING ANY dt METRIC
 
 **Root cause (found by cross-checking wandb lineages against the code):** `t_min`/`t_max`/`base_dt`
