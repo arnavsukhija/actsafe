@@ -35,7 +35,8 @@ def modify_reward(
         # Ablatable via continuous_time.opax_dt_normalization.
         pseudo_time = trajectory.action[..., -1]
         time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
-        dt_ratio = jnp.maximum(jnp.round(time_for_action / base_dt), 1.0)
+        # floor matches SwitchCostWrapper's executed-hold quantization exactly.
+        dt_ratio = jnp.maximum(jnp.floor(time_for_action / base_dt), 1.0)
         # stop_gradient is critical: else Opax minimizes dt_ratio to inflate the reward.
         new_rewards = new_rewards / jax.lax.stop_gradient(dt_ratio)
 

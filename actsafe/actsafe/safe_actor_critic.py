@@ -235,9 +235,10 @@ def evaluate_actor(
         
         time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
         dt_raw = time_for_action / base_dt
-        # Straight-through estimator: round for the logic, but pass gradients through.
-        # This allows the actor to learn pseudo_time via backprop through the world model.
-        dt_ratio = dt_raw + jax.lax.stop_gradient(jnp.maximum(jnp.round(dt_raw), 1.0) - dt_raw)
+        # Straight-through estimator: floor for the logic (matching SwitchCostWrapper's
+        # floor exactly), but pass gradients through. The internal stop_gradient IS the
+        # STE mechanism (floor has zero derivative a.e.), not a gradient block.
+        dt_ratio = dt_raw + jax.lax.stop_gradient(jnp.maximum(jnp.floor(dt_raw), 1.0) - dt_raw)
         
         # Compute per-step discounts: shape [batch_size, horizon]
         discount = base_discount ** dt_ratio

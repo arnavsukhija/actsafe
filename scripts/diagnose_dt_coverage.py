@@ -37,7 +37,8 @@ def load_agent(state_path: str):
 
 def dt_ratio_from_pseudo(pseudo, tmin, tmax, base_dt):
     time_for_action = ((tmax - tmin) / 2.0 * pseudo) + (tmax + tmin) / 2.0
-    return np.maximum(np.round(time_for_action / base_dt), 1.0)
+    # floor matches SwitchCostWrapper's executed-hold quantization exactly.
+    return np.maximum(np.floor(time_for_action / base_dt), 1.0)
 
 
 def pseudo_from_dt_ratio(dt_ratio, tmin, tmax, base_dt):
