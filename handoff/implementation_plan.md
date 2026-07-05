@@ -11,7 +11,70 @@ Companion docs in this `handoff/` folder (mirror of the auto-memory): `MEMORY.md
 
 ---
 
-## oTaCoS-ALIGNED ACTION-CONDITIONED DECODER (2026-07-05) — CURRENT FIX UNDER TEST
+## THE "dt COLLAPSE" WAS A RESUME LOGGING ARTIFACT (2026-07-05) — READ BEFORE TRUSTING ANY dt METRIC
+
+**Root cause (found by cross-checking wandb lineages against the code):** `t_min`/`t_max`/`base_dt`
+are injected into the hydra config at runtime by the trainer, but (pre-fix) only inside
+`make_agent()` — which never runs on requeue-resume (`from_pickle` reuses the pickled agent). The
+resumed trainer's `_run_training_epoch` then fell back to `tmin=tmax=0, base_dt=1`, and
+`EpochSummary.continuous_time_metrics` computed `time_for_action ≡ 0 → dt_ratio ≡ 1` for **every
+action of every resumed run**. Behavior was NOT affected: the pickled `make_env` closure and the
+pickled actor-critic carry the correct values, and the objective/cost curves are continuous across
+requeues (a genuine dt→1 collapse at sc=0.05 would show a −50 switch-cost drop in the objective;
+it never does — the genuine dt=1 OPAX phase at 250k–500k shows exactly that −50 signature).
+
+**Consequences for every prior conclusion:**
+- Every "dt collapses to 1 by ~4M steps" observation (both sweeps, both `safety_dt_gradient`
+  settings, pre- and post-decoder-fix) coincides exactly with the first requeue. **All post-requeue
+  `train/ct/*` metrics in `actsafe-ct-pointgoal` before 2026-07-05 are invalid.** Pre-requeue
+  segments (fresh runs, typically up to ~2.4M steps) are the only valid dt telemetry.
+- What the VALID data actually shows (fresh 2026-07-04 23:46 batch, decoder fix + sgd=False):
+  offline phase dt≈12.2 (uniform [0,1) pseudo — upper half only), OPAX phase dt=1.0 exactly
+  (genuine: per-time-normalized bonus favors max decision rate; objective = −50·switch_cost
+  confirms), then the task actor takes over at 500k with dt≈14 declining smoothly to ≈8–9 at 2.4M
+  for sc=0.05 (std ≈5 — real diversity), dt≈1.7–2.2 for sc=0.01, dt≈1.1–1.4 for sc=0.002. That is
+  a *sane, switch-cost-scaled, slowly adapting* dt profile, not a collapse.
+- The "TASE sits at cost≈33 **at dt≈1**" load-bearing fact is half wrong: the cost numbers are
+  real (cost metrics don't use tmin/tmax), the dt≈1 attribution was the artifact. **The real open
+  problem is cost_return ≈25–45 vs budget 25 (feasibility ≈0.2) at whatever dt the policy actually
+  runs.** Whether the decoder fix helps dt-adaptation is UNDECIDED — post-2.4M dt telemetry from
+  the current sweep is garbage.
+
+**Fix (committed):** `Trainer._populate_continuous_time_config()` now runs in `__enter__` (fresh
+AND resume paths); `_run_training_epoch` asserts the keys exist instead of silently defaulting.
+Currently-running runs keep logging garbage dt until requeued/relaunched with the fix.
+
+**dt data-coverage mechanism (committed, addresses the chicken-and-egg exploration gap):**
+`agent.continuous_time.dt_exploration=uniform` (+ optional `dt_exploration_steps`, default =
+`exploration_steps`): during the warm-up window the EXECUTED action's dt head is resampled
+uniformly over pseudo-time [−1, 1] (policy's force dims kept) in `ActSafe.__call__` — real-env
+rollouts only, `AgentState.prev_action` updated so the RSSM filter conditions on the executed
+action. Rationale: offline phase covers only the upper half of the dt range and the OPAX phase
+collapses to dt=1, so the early buffer has no same-state multi-dt contrast for the WM to learn
+c̄(s,u,t) from. Enabled by default in `safe_goal_tase.yaml`. Old pickles resume fine (defensive
+getattr).
+
+**Diagnostics (committed):** `scripts/diagnose_dt_coverage.py <run_dir>/state.pkl [--two-curve K]`
+— run on the cluster. Reports (1) dt histograms per hazard-proximity bucket from the replay buffer
+(Step-1 coverage check) and (2) predicted cost mean + ensemble disagreement vs dt at near-hazard
+posterior states (the two-curve model diagnostic).
+
+**Next actions:**
+1. Relaunch the sgd=False sweep FRESH with the metric fix + `dt_exploration=uniform` (same grid);
+   the running artifact-logged runs can be left to finish for cost curves but their dt telemetry is
+   unusable.
+2. After ~1M steps, run `diagnose_dt_coverage.py --two-curve 8` on one checkpoint per switch_cost
+   to verify near-hazard dt coverage and dt→cost model sensitivity (before/after comparison).
+3. THEN judge the decoder fix on valid full-length dt curves; only touch actor-loss wiring if the
+   two-curve mean stays dt-flat despite verified coverage.
+4. The cost≈30+ vs budget 25 infeasibility is the other real problem (frequency-independent;
+   also present pre-requeue) — likely the within-window cost-discounting leak; tackle separately.
+
+---
+
+## oTaCoS-ALIGNED ACTION-CONDITIONED DECODER (2026-07-05) — SUPERSEDED READ: see section above
+(The "collapse by 4.2M" premise below was the resume artifact; the structural c̄(s,u,t) argument
+and the committed decoder change remain valid, but its effect is still untested on valid telemetry.)
 
 **Empirical state (wandb `actsafe-ct-pointgoal`, sdg sweep of 2026-07-04, 18 configs × requeue):**
 - `mean_dt` scales cleanly with switch_cost pre-requeue (≈1.2 / 1.9 / 5.5 for sc 0.002/0.01/0.05),

@@ -55,6 +55,13 @@ continuous_time:
   opax_dt_normalization: true  # divide OPAX bonus by dt_ratio (per-time uncertainty); ablatable
   safety_dt_gradient: true  # inject d(cost)/d(dt) = pessimistic per-step cost into the safety-lambda
                             # so safety pulls the hold length down near hazards; ablatable (set false)
+  dt_exploration: policy  # "uniform": during the warm-up window, replace the dt head of the
+                          # EXECUTED action with a uniform pseudo-time in [-1, 1] (policy's
+                          # force dims kept), so the buffer contains same-state multi-dt
+                          # coverage (oTaCoS-style data assumption) independent of the acting
+                          # policy's dt preferences. Real-env rollouts only; imagination and
+                          # all losses untouched.
+  dt_exploration_steps: null  # sim-step length of the uniform-dt window; null = exploration_steps
 plan_horizon: 15
 update_steps: 100
 train_every: 1000

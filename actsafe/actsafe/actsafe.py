@@ -112,6 +112,23 @@ class ActSafe:
         self._train_every = config.agent.train_every
         self.should_explore = Until(config.agent.exploration_steps, steps=1)
         self.should_collect_offline = Until(config.agent.offline_steps, steps=1)
+        # TASE dt-exploration: during the warm-up window, resample the dt head of the
+        # executed action uniformly over [-1, 1] (pseudo-time), independent of the
+        # policy, while keeping the policy's force dims. This decouples the world
+        # model's (state, u, t) training coverage from the acting policy's dt
+        # preferences — the oTaCoS-style data assumption — so that same-state
+        # multi-dt contrasts exist in the buffer even if the policy's dt collapses.
+        # Applies only to real-environment rollouts (this class only acts in the
+        # real env); imagination and all loss formulations are untouched.
+        ct_cfg = config.agent.get("continuous_time", {})
+        self._dt_exploration_uniform = bool(
+            ct_cfg.get("enabled", False)
+            and ct_cfg.get("dt_exploration", "policy") == "uniform"
+        )
+        dt_exploration_steps = ct_cfg.get("dt_exploration_steps", None)
+        if dt_exploration_steps is None:
+            dt_exploration_steps = config.agent.exploration_steps
+        self.should_explore_dt = Until(dt_exploration_steps, steps=1)
         learn_model_steps = (
             config.agent.learn_model_steps
             if config.agent.learn_model_steps is not None
@@ -149,6 +166,17 @@ class ActSafe:
             observation,
             next(self.prng),
         )
+        # getattr: agents un-pickled from pre-dt-exploration checkpoints lack these.
+        if getattr(self, "_dt_exploration_uniform", False) and self.should_explore_dt():
+            # Full-range pseudo-time (the offline UniformExploration policy samples
+            # [0, 1), which only covers the upper half of [t_min, t_max]).
+            dt_pseudo = jax.random.uniform(
+                next(self.prng), (actions.shape[0],), minval=-1.0, maxval=1.0
+            )
+            actions = actions.at[:, -1].set(dt_pseudo)
+            # Keep prev_action consistent with the action actually executed, so the
+            # RSSM filter conditions on the true (state, u, t) transition.
+            self.state = AgentState(self.state.rssm_state, actions)
         return np.asarray(actions)
 
     def observe(self, trajectory: TrajectoryData) -> None:
@@ -170,6 +198,9 @@ class ActSafe:
             self._train_sim_steps += sim_steps
             self.should_explore.count += sim_steps
             self.should_collect_offline.count += sim_steps
+            # getattr: agents un-pickled from pre-dt-exploration checkpoints lack this.
+            if (dt_until := getattr(self, "should_explore_dt", None)) is not None:
+                dt_until.count += sim_steps
             self.learn_model.count += sim_steps
 
     def update(self):
