@@ -67,7 +67,6 @@ class SafeModelBasedActorCritic:
         objective_sentiment: Sentiment,
         constraint_sentiment: Sentiment,
         actor_entropy_coef: float = 0.0,
-        safety_dt_gradient: bool = True,
     ):
         actor_key, critic_key, safety_critic_key = jax.random.split(key, 3)
         self.actor = ContinuousActor(
@@ -97,7 +96,6 @@ class SafeModelBasedActorCritic:
         self.objective_sentiment = objective_sentiment
         self.constraint_sentiment = constraint_sentiment
         self.actor_entropy_coef = actor_entropy_coef
-        self.safety_dt_gradient = safety_dt_gradient
 
     def update(
         self,
@@ -132,7 +130,6 @@ class SafeModelBasedActorCritic:
             self.objective_sentiment,
             self.constraint_sentiment,
             self.actor_entropy_coef,
-            self.safety_dt_gradient,
         )
         self.actor = results.new_actor
         self.critic = results.new_critic
@@ -227,7 +224,6 @@ def evaluate_actor(
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
     actor_entropy_coef: float = 0.0,
-    safety_dt_gradient: bool = True,
 ) -> ActorEvaluation:
     trajectories, priors = rollout_fn(horizon, initial_states, key, actor.act)
     
@@ -266,12 +262,6 @@ def evaluate_actor(
     )
     bootstrap_safety_values = nest_vmap(safety_critic, 2, eqx.filter_vmap)(next_states)
     costs = current_step(constraint_sentiment(trajectories.cost, priors))
-    if continuous_time and safety_dt_gradient:
-        dt_ratio_current = current_step(dt_ratio)
-        cost_rate = jax.lax.stop_gradient(costs / dt_ratio_current)
-        costs = costs + cost_rate * (
-            dt_ratio_current - jax.lax.stop_gradient(dt_ratio_current)
-        )
     safety_lambda_values = eqx.filter_vmap(compute_lambda_values)(
         bootstrap_safety_values,
         costs,
@@ -338,7 +328,6 @@ def update_safe_actor_critic(
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
     actor_entropy_coef: float = 0.0,
-    safety_dt_gradient: bool = True,
 ) -> SafeActorCriticStepResults:
     vmapped_rollout_fn = jax.vmap(model.sample, (None, 0, None, None))
     actor_grads, new_penalty_state, evaluation, metrics, step_scale = penalty_fn(
@@ -361,7 +350,6 @@ def update_safe_actor_critic(
             objective_sentiment,
             constraint_sentiment,
             actor_entropy_coef,
-            safety_dt_gradient,
         ),
         penalty_state,
         actor,

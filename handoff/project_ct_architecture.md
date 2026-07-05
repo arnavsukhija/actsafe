@@ -23,8 +23,15 @@ dt_ratio = dt_raw + jax.lax.stop_gradient(jnp.maximum(jnp.floor(dt_raw), 1.0) - 
 ```
 Forward: discrete floor value. Backward: identity gradient through dt_raw → actor learns pseudo_time via backprop.
 
-### Stop Gradient on Discount
-`discount = base_discount ** dt_ratio` uses `stop_gradient` on dt_ratio to prevent the actor from hacking safety by increasing dt to shrink `γ^dt → 0` and hide future costs.
+### Discount is FULLY differentiable (corrected 2026-07-05)
+`discount = base_discount ** dt_ratio` has NO stop_gradient on dt_ratio. The stop_gradient was
+removed in `66ea7fe`/`fd6fe3b` and its absence is now a deliberate design decision (user +
+supervisor, 2026-07-05: stay vanilla-faithful; in an SMDP the value genuinely depends on dt
+through the discount, so the gradient is legitimate). The only stop_gradient in the dt path is
+the STE's internal one, which IS the straight-through mechanism (floor/round has zero derivative
+a.e.), not a gradient block. The `safety_dt_gradient` cost-rate injection and the OPAX
+dt-normalization default were removed the same day (normalization stays as an opt-in flag,
+default false).
 
 ### time_to_go Stripping
 The world model CNN strips the scalar `time_to_go` channel before convolution — it's a homogeneous scalar with no spatial structure that degraded image reconstruction when fed into conv layers.

@@ -56,7 +56,10 @@ class OpaxExploration(Exploration):
         self.tmin = ct_cfg.get("t_min", None) if self.continuous_time else None
         self.tmax = ct_cfg.get("t_max", None) if self.continuous_time else None
         self.base_dt = ct_cfg.get("base_dt", None) if self.continuous_time else None
-        self.opax_dt_normalization = ct_cfg.get("opax_dt_normalization", True)
+        # Default OFF: dividing the bonus by dt is not part of vanilla OPAX and the
+        # claimed dt->max failure mode it guards against was never observed with the
+        # flag disabled. Kept as an opt-in flag for ablations only.
+        self.opax_dt_normalization = ct_cfg.get("opax_dt_normalization", False)
 
     def update(
         self,

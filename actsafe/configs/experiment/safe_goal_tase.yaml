@@ -7,7 +7,6 @@
 # SWEEP:
 #   agent.continuous_time.switch_cost=0.002,0.01,0.05
 #   agent.continuous_time.max_time_factor=4,8,16
-#   agent.continuous_time.opax_dt_normalization=true,false   # ablation
 #   training.seed=0,1,2
 defaults:
   - override /environment: safe_adaptation_gym
@@ -35,11 +34,9 @@ agent:
     min_time_factor: 1         # shortest hold = act every base step (highest frequency)
     max_time_factor: 16        # longest hold = 16 base steps (matches AR16)
     switch_cost: 0.01          # per-decision cost; SWEEP {0.002, 0.01, 0.05}
-    dt_exploration: uniform    # warm-up executes uniformly sampled dt (policy's force kept):
-                               # the offline phase samples pseudo-dt in [0,1) (upper half of the
-                               # range only) and the OPAX actor collapses dt->1, so without this
-                               # the buffer lacks same-state multi-dt contrast for c̄(s,u,t)
-    # base_dt inferred at runtime from the env
+    dt_exploration: policy     # OFF: the train/ct/buffer/* metrics measure the buffer's
+                               # NATURAL dt coverage first; only re-enable "uniform" if those
+                               # metrics show collapsed near-hazard coverage
   # If the dt head saturates (train/ct/frac_dt_1 or frac_dt_max ~1, std_dt_ratio ~0),
   # give it its own init std by uncommenting (see handoff):
   # actor:

@@ -52,9 +52,7 @@ continuous_time:
   min_time_factor: 1
   max_time_factor: 50
   switch_cost: 0.1
-  opax_dt_normalization: true  # divide OPAX bonus by dt_ratio (per-time uncertainty); ablatable
-  safety_dt_gradient: true  # inject d(cost)/d(dt) = pessimistic per-step cost into the safety-lambda
-                            # so safety pulls the hold length down near hazards; ablatable (set false)
+  opax_dt_normalization: false  # non-vanilla; opt-in for ablations only (divide OPAX bonus by dt)
   dt_exploration: policy  # "uniform": during the warm-up window, replace the dt head of the
                           # EXECUTED action with a uniform pseudo-time in [-1, 1] (policy's
                           # force dims kept), so the buffer contains same-state multi-dt

@@ -9,6 +9,57 @@ ActSafe is a model-based RL research implementation for safe exploration with ac
 This fork extends ActSafe toward a **continuous-time / control-frequency safety** research story
 (targeting ICLR 2027).
 
+## Current Project State (as of 2026-07-04)
+
+**Live investigation: OPAX dt-collapse during TASE exploration, and whether three CT design
+choices are actually necessary.** Not yet resolved — read this before continuing the thread.
+
+**Background.** TASE agent outputs action `u` + pseudo-time `t ∈ [0,1]`, mapped affinely to hold
+duration `dt`. During the OPAX exploration phase (first `exploration_steps=500000` steps), fresh
+(non-resumed) wandb segments show a clean, reproducible collapse: steps 50–200k have `mean_dt≈12`
+(near max), but steps 250–500k show `mean_dt≡1.00` and `frac_dt_1≡1.00` exactly — 100% of decisions
+pick `dt=1` — before partially recovering by 550k+. Separately, `agent/safety_critic/constraint` is
+positive everywhere across 178 CT runs (0.39–0.74, `frac>0=1.00`) while realized `cost_return`
+violates the budget (25–55 vs budget 2.5) — the model/critic is optimistic about cost in dt-space;
+this is not an enforcement failure.
+
+**Bugs found and fixed this session:**
+- Resume-path telemetry loss: `t_min`/`t_max`/`base_dt` were injected only in `make_agent()` on
+  fresh start, not on pickle resume, so post-resume `dt_ratio` logging silently fell back to
+  uninitialized 0/0/1 (mechanically confirmed via `std≡0`). Fixed by moving injection into
+  `Trainer.__enter__` so it runs on both paths. This means: **the 250–500k collapse window is real
+  OPAX behavior, not a resume artifact** — it's only visible pre-fix in fresh segments because
+  resumed segments showed `dt≡1` throughout for the wrong (logging) reason.
+- Objective conflation: `train/objective` was penalized (included `-switch_cost`), not comparable
+  across `switch_cost` sweep values. Fixed by plumbing `reward_realized` (undiscounted, unpenalized)
+  through `SwitchCostWrapper → Transition → Trajectory.as_numpy() → EpochSummary → Trainer`, now
+  logged separately as `train/objective_raw`. Committed as `a5a9674`.
+- `StateWriter` (`actsafe/rl/logging.py:247`) pickle corruption: wrote directly to `state.pkl` in
+  `"wb"` mode (truncates before write), so a SIGKILL mid-write (SLURM requeue or manual kill)
+  destroys the checkpoint with no fallback. **Fixed and already applied** (see current file
+  contents at lines 266–278): writes to `state.pkl.tmp`, `fsync`s, then `os.replace()`s atomically.
+
+**Open, unresolved questions — user is explicitly skeptical of the current design and wants
+evidence, not theory, before accepting any of these:**
+1. Is `opax_dt_normalization` (dividing the OPAX bonus by `stop_gradient(dt_ratio)`) actually
+   necessary? The theoretical claim (`actsafe/actsafe/opax.py` around line 32) is that without it
+   the actor inflates uncertainty by predicting far ahead and locks `dt` to max. No empirical
+   evidence has been shown for this failure mode specifically.
+2. Is the explicit `dt_exploration=uniform` warm-up phase needed, or does OPAX naturally explore
+   the dt head on its own? Unknown — **the replay buffer's actual dt composition during/after the
+   250–500k collapse has never been directly inspected** (would need `diagnose_dt_coverage.py` on
+   a completed checkpoint's buffer + a two-curve cost-head dt-sensitivity check). No verified pickle
+   checkpoint has been available yet to run this — this is the highest-priority next step.
+3. Should `dt` be a continuous action at all (pseudo-time → affine-mapped hold duration, requiring
+   min/max time-repeat scaling), or would a discrete repeat-counter design (wrapper just receives
+   the repeat value directly, no need to scale `t_min`/`t_max`) be simpler with similar
+   interpolation behavior? Raised by the user, not yet investigated — no code changes made.
+
+**Do not commit to an ablation sweep or redesign before verifying #2** (buffer dt composition and
+cost-head dt-sensitivity) on a real checkpoint — that data should settle whether #1 and #3 are
+worth pursuing, per the user's explicit instruction to check data before agreeing with or proposing
+fixes.
+
 ## Handoff & Current Status — READ THIS FIRST
 
 **All project documentation, decisions, progress, and the running plan live in [`handoff/`](handoff/).**
@@ -127,8 +178,11 @@ This fork adds continuous-time / control-frequency machinery on top of upstream 
    outputs an action plus a duration `dt`); variable-length episode handling in the replay buffer;
    step counting via `base_dt`; stripping the scalar `time_to_go` channel before the world-model CNN.
 2. **Discounting & optimization** — variable discount `base_discount ** dt_ratio` with a
-   straight-through estimator; `stop_gradient` on `dt_ratio` so the actor can't game the discount
-   to hide future cost by stretching `dt`.
+   straight-through estimator. The discount is FULLY DIFFERENTIABLE w.r.t. the dt head — this is
+   deliberate and vanilla-faithful (decided with the supervisor, 2026-07-05). The STE's internal
+   `stop_gradient` is the estimator mechanism itself (round has zero derivative a.e.), not a
+   gradient block. Earlier versions of this doc claimed a `stop_gradient` on `dt_ratio` in the
+   discount; that was removed in `66ea7fe`/`fd6fe3b` and is intentionally absent.
 3. **Safety & LBSGD** — world-model `sample()` shape-bug fix; action-repeat-aware safety-budget
    scaling; the LBSGD fallback step scaled downstream of Adam (so the safety-recovery step isn't
    normalized away); `jnp.maximum(constraint, 1e-12)` log-barrier guard.
