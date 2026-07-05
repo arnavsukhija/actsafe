@@ -11,9 +11,8 @@ class OpaxBridge(eqx.Module):
     reward_scale: float = eqx.field(static=True)
     reward_epistemic_scale: float = eqx.field(static=True)
     continuous_time: bool = eqx.field(static=True)
-    tmin: float | None = eqx.field(static=True)
-    tmax: float | None = eqx.field(static=True)
-    base_dt: float | None = eqx.field(static=True)
+    k_min: float | None = eqx.field(static=True)
+    k_max: float | None = eqx.field(static=True)
     dt_normalization: bool = eqx.field(static=True)
 
     def sample(
@@ -39,8 +38,7 @@ class OpaxBridge(eqx.Module):
             self.reward_scale,
             self.reward_epistemic_scale,
             continuous_time=self.continuous_time,
-            tmin=self.tmin,
-            tmax=self.tmax,
-            base_dt=self.base_dt,
+            k_min=self.k_min,
+            k_max=self.k_max,
             dt_normalization=self.dt_normalization,
         )

@@ -13,6 +13,7 @@ from actsafe.actsafe.rssm import ShiftScale
 from actsafe.actsafe.sentiment import Sentiment
 from actsafe.actsafe.actor_critic import ContinuousActor, Critic, actor_entropy
 from actsafe.opax import normalized_epistemic_uncertainty
+from actsafe.rl import ct_time
 from actsafe.rl.types import Model, RolloutFn
 from actsafe.rl.utils import nest_vmap
 
@@ -59,9 +60,8 @@ class SafeModelBasedActorCritic:
         lambda_: float,
         safety_budget: float,
         continuous_time: bool,
-        tmin: float | None,
-        tmax: float | None,
-        base_dt: float | None,
+        k_min: int | None,
+        k_max: int | None,
         key: jax.Array,
         penalizer: Penalizer,
         objective_sentiment: Sentiment,
@@ -89,9 +89,8 @@ class SafeModelBasedActorCritic:
         self.lambda_ = lambda_
         self.safety_budget = safety_budget
         self.continuous_time = continuous_time
-        self.tmin = tmin
-        self.tmax = tmax
-        self.base_dt = base_dt
+        self.k_min = k_min
+        self.k_max = k_max
         self.penalizer = penalizer
         self.objective_sentiment = objective_sentiment
         self.constraint_sentiment = constraint_sentiment
@@ -122,9 +121,8 @@ class SafeModelBasedActorCritic:
             self.lambda_,
             self.safety_budget,
             self.continuous_time,
-            self.tmin,
-            self.tmax,
-            self.base_dt,
+            self.k_min,
+            self.k_max,
             self.penalizer,
             self.penalizer.state,
             self.objective_sentiment,
@@ -218,9 +216,8 @@ def evaluate_actor(
     lambda_: float,
     safety_budget: float,
     continuous_time: bool,
-    tmin: float | None,
-    tmax: float | None,
-    base_dt: float | None,
+    k_min: float | None,
+    k_max: float | None,
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
     actor_entropy_coef: float = 0.0,
@@ -232,14 +229,10 @@ def evaluate_actor(
         # Actions are shape [batch_size, horizon, action_dim]
         actions = trajectories.action
         pseudo_time = actions[..., -1]
-        
-        time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
-        dt_raw = time_for_action / base_dt
-        # Straight-through estimator: floor for the logic (matching SwitchCostWrapper's
-        # floor exactly), but pass gradients through. The internal stop_gradient IS the
-        # STE mechanism (floor has zero derivative a.e.), not a gradient block.
-        dt_ratio = dt_raw + jax.lax.stop_gradient(jnp.maximum(jnp.floor(dt_raw), 1.0) - dt_raw)
-        
+
+        # Floor STE in repeat units, matching SwitchCostWrapper's execution exactly.
+        dt_ratio = ct_time.ste_dt_ratio(pseudo_time, k_min, k_max)
+
         # Compute per-step discounts: shape [batch_size, horizon]
         discount = base_discount ** dt_ratio
         safety_discount = base_safety_discount ** dt_ratio
@@ -278,7 +271,7 @@ def evaluate_actor(
         # ~-16.57 floor and reward -> 0). `actor_entropy` returns mean policy entropy
         # (-log_prob); subtracting it from the loss MAXIMIZES entropy. It is computed on
         # the full action vector, so in continuous-time mode it also regularizes the dt
-        # head (which shares init_stddev and could otherwise saturate to t_min/t_max).
+        # head (which shares init_stddev and could otherwise saturate to min/max repeat).
         # Flows into the OBJECTIVE gradient via the penalizer (not the safety constraint).
         loss = loss - actor_entropy_coef * actor_entropy(actor, initial_states)
     constraint = safety_budget - safety_lambda_values.mean()
@@ -321,9 +314,8 @@ def update_safe_actor_critic(
     lambda_: float,
     safety_budget: float,
     continuous_time: bool,
-    tmin: float | None,
-    tmax: float | None,
-    base_dt: float | None,
+    k_min: float | None,
+    k_max: float | None,
     penalty_fn: Penalizer,
     penalty_state: Any,
     objective_sentiment: Sentiment,
@@ -345,9 +337,8 @@ def update_safe_actor_critic(
             lambda_,
             safety_budget,
             continuous_time,
-            tmin,
-            tmax,
-            base_dt,
+            k_min,
+            k_max,
             objective_sentiment,
             constraint_sentiment,
             actor_entropy_coef,

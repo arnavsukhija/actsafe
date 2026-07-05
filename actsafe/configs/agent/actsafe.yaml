@@ -49,8 +49,11 @@ lambda_: 0.95
 actor_entropy_coef: 0.0
 continuous_time:
   enabled: false
-  min_time_factor: 1
-  max_time_factor: 50
+  # Hold-length bounds in REPEAT UNITS (base control steps). The dt head's
+  # pseudo-time in [-1, 1] maps affinely to [min_repeat, max_repeat] and is
+  # floored; physical seconds never enter the agent (info['dt'] is debug-only).
+  min_repeat: 1
+  max_repeat: 50
   switch_cost: 0.1
   opax_dt_normalization: false  # non-vanilla; opt-in for ablations only (divide OPAX bonus by dt)
   dt_exploration: policy  # "uniform": during the warm-up window, replace the dt head of the

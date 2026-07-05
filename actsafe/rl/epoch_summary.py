@@ -4,6 +4,7 @@ from typing import Any, List, Tuple
 import numpy as np
 from numpy import typing as npt
 
+from actsafe.rl import ct_time
 from actsafe.rl.trajectory import Trajectory
 
 
@@ -12,9 +13,8 @@ class EpochSummary:
     _data: list[list[Trajectory]] = field(default_factory=list)
     cost_boundary: float = 25.0
     continuous_time: bool = False
-    tmin: float = 0.0
-    tmax: float = 0.0
-    base_dt: float = 1.0
+    k_min: float = 1.0
+    k_max: float = 1.0
 
     @property
     def empty(self):
@@ -116,17 +116,14 @@ class EpochSummary:
         pseudo_time = np.concatenate(pseudo_times)
         force = np.concatenate(forces, axis=0)
 
-        # Convert pseudo_time to dt_ratio using the same formula as the environment
-        time_for_action = ((self.tmax - self.tmin) / 2.0 * pseudo_time) + (self.tmax + self.tmin) / 2.0
-        dt_ratio = np.maximum(np.round(time_for_action / self.base_dt), 1.0)
+        # Convert pseudo_time to dt_ratio using the same mapping as the environment
+        dt_ratio = ct_time.dt_ratio_from_pseudo(pseudo_time, self.k_min, self.k_max)
 
         return {
             "train/ct/mean_dt_ratio": float(np.mean(dt_ratio)),
             "train/ct/std_dt_ratio": float(np.std(dt_ratio)),
             "train/ct/frac_dt_1": float(np.mean(dt_ratio == 1.0)),
-            "train/ct/frac_dt_max": float(np.mean(
-                dt_ratio == np.round(self.tmax / self.base_dt)
-            )),
+            "train/ct/frac_dt_max": float(np.mean(dt_ratio == float(self.k_max))),
             "train/ct/mean_abs_force": float(np.mean(np.abs(force))),
             "train/ct/std_force": float(np.std(force)),
         }

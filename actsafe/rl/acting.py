@@ -130,16 +130,14 @@ def epoch(
     render_episodes: int = 0,
     cost_boundary: float = 25.0,
     continuous_time: bool = False,
-    tmin: float = 0.0,
-    tmax: float = 0.0,
-    base_dt: float = 1.0,
+    k_min: float = 1.0,
+    k_max: float = 1.0,
 ) -> tuple[EpochSummary, int]:
     summary = EpochSummary(
         cost_boundary=cost_boundary,
         continuous_time=continuous_time,
-        tmin=tmin,
-        tmax=tmax,
-        base_dt=base_dt,
+        k_min=k_min,
+        k_max=k_max,
     )
     samples, step = interact(
         agent,

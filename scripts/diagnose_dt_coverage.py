@@ -11,7 +11,7 @@ Loads a run's ``state.pkl`` (the pickled Trainer state, on the cluster) and repo
    fix, and re-running this script afterwards verifies it.
 
 2. Two-curve model diagnostic (Step 3): at K near-hazard states (posterior belief
-   inferred by filtering the episode prefix), sweep dt over [1, max_time_factor]
+   inferred by filtering the episode prefix), sweep dt over [1, max_repeat]
    with the originally executed force, and report the predicted cost mean and the
    cost ensemble disagreement (std over the dynamics-ensemble arrival states) as
    functions of dt. A dt-flat mean curve after coverage is fixed would indict the
@@ -28,6 +28,8 @@ from collections import OrderedDict
 import cloudpickle
 import numpy as np
 
+from actsafe.rl.ct_time import dt_ratio_from_pseudo, pseudo_from_dt_ratio
+
 
 def load_agent(state_path: str):
     with open(state_path, "rb") as f:
@@ -35,15 +37,17 @@ def load_agent(state_path: str):
     return state["agent"], state.get("step")
 
 
-def dt_ratio_from_pseudo(pseudo, tmin, tmax, base_dt):
-    time_for_action = ((tmax - tmin) / 2.0 * pseudo) + (tmax + tmin) / 2.0
-    # floor matches SwitchCostWrapper's executed-hold quantization exactly.
-    return np.maximum(np.floor(time_for_action / base_dt), 1.0)
+def ct_params(ac) -> tuple[float, float]:
+    """Repeat-unit hold bounds (k_min, k_max) from the actor-critic.
 
-
-def pseudo_from_dt_ratio(dt_ratio, tmin, tmax, base_dt):
-    t = dt_ratio * base_dt
-    return (2.0 * t - (tmax + tmin)) / (tmax - tmin)
+    Supports both the current layout (k_min/k_max repeat units) and legacy
+    checkpoints (tmin/tmax/base_dt physical seconds).
+    """
+    k_min = getattr(ac, "k_min", None)
+    k_max = getattr(ac, "k_max", None)
+    if k_min is not None and k_max is not None:
+        return float(k_min), float(k_max)
+    return float(ac.tmin / ac.base_dt), float(ac.tmax / ac.base_dt)
 
 
 PROXIMITY_BUCKETS = OrderedDict(
@@ -59,12 +63,11 @@ PROXIMITY_BUCKETS = OrderedDict(
 
 def coverage_report(agent) -> None:
     buf = agent.replay_buffer
-    ac = agent.actor_critic
-    tmin, tmax, base_dt = ac.tmin, ac.tmax, ac.base_dt
-    max_dt = int(round(tmax / base_dt))
+    k_min, k_max = ct_params(agent.actor_critic)
+    max_dt = int(round(k_max))
     n = buf._valid_episodes
     print(f"\n=== Step 1: dt coverage by hazard proximity ({n} episodes) ===")
-    print(f"tmin={tmin} tmax={tmax} base_dt={base_dt} (max dt_ratio {max_dt})")
+    print(f"k_min={k_min} k_max={k_max} (max dt_ratio {max_dt})")
 
     all_dt, all_prox = [], []
     for ep in range(n):
@@ -73,7 +76,7 @@ def coverage_report(agent) -> None:
             continue
         cost = buf.cost[ep, :length]
         pseudo = buf.action[ep, :length, -1]
-        dt = dt_ratio_from_pseudo(pseudo, tmin, tmax, base_dt)
+        dt = dt_ratio_from_pseudo(pseudo, k_min, k_max)
         # Decisions to the nearest costful hold (before or after) in the episode.
         hazard_idx = np.where(cost > 0)[0]
         if len(hazard_idx) == 0:
@@ -116,10 +119,9 @@ def two_curve_report(agent, num_states: int, seed: int = 0) -> None:
     from actsafe.rl.trajectory import TrajectoryData
 
     buf = agent.replay_buffer
-    ac = agent.actor_critic
     model = agent.model
-    tmin, tmax, base_dt = ac.tmin, ac.tmax, ac.base_dt
-    max_dt = int(round(tmax / base_dt))
+    k_min, k_max = ct_params(agent.actor_critic)
+    max_dt = int(round(k_max))
     rs = np.random.RandomState(seed)
     key = jax.random.PRNGKey(seed)
 
@@ -156,7 +158,7 @@ def two_curve_report(agent, num_states: int, seed: int = 0) -> None:
         force = buf.action[ep, t, :-1]
         means, stds = [], []
         for dtv in dt_grid:
-            pseudo = pseudo_from_dt_ratio(float(dtv), tmin, tmax, base_dt)
+            pseudo = pseudo_from_dt_ratio(float(dtv), k_min, k_max)
             action = jnp.asarray(np.concatenate([force, [pseudo]], 0), dtype=jnp.float32)
             ensemble_states, _ = model.cell.predict(state, action, k2)
             flat = ensemble_states.flatten()  # [E, state_dim]

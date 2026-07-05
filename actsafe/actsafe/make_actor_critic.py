@@ -72,9 +72,12 @@ def make_actor_critic(
         lambda_=cfg.agent.lambda_,
         safety_budget=episode_safety_budget,
         continuous_time=cfg.agent.continuous_time.enabled,
-        tmin=cfg.agent.continuous_time.t_min if cfg.agent.continuous_time.enabled else None,
-        tmax=cfg.agent.continuous_time.t_max if cfg.agent.continuous_time.enabled else None,
-        base_dt=cfg.agent.continuous_time.base_dt if cfg.agent.continuous_time.enabled else None,
+        k_min=cfg.agent.continuous_time.get("min_repeat", 1)
+        if cfg.agent.continuous_time.enabled
+        else None,
+        k_max=cfg.agent.continuous_time.get("max_repeat")
+        if cfg.agent.continuous_time.enabled
+        else None,
         penalizer=penalizer,
         key=key,
         objective_sentiment=objective_sentiment,

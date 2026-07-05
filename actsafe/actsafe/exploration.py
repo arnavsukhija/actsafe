@@ -53,9 +53,8 @@ class OpaxExploration(Exploration):
         self.epistemic_scale = config.agent.exploration_epistemic_scale
         ct_cfg = config.agent.get("continuous_time", {})
         self.continuous_time = ct_cfg.get("enabled", False)
-        self.tmin = ct_cfg.get("t_min", None) if self.continuous_time else None
-        self.tmax = ct_cfg.get("t_max", None) if self.continuous_time else None
-        self.base_dt = ct_cfg.get("base_dt", None) if self.continuous_time else None
+        self.k_min = ct_cfg.get("min_repeat", 1) if self.continuous_time else None
+        self.k_max = ct_cfg.get("max_repeat", None) if self.continuous_time else None
         # Default OFF: dividing the bonus by dt is not part of vanilla OPAX and the
         # claimed dt->max failure mode it guards against was never observed with the
         # flag disabled. Kept as an opt-in flag for ablations only.
@@ -72,9 +71,8 @@ class OpaxExploration(Exploration):
             self.reward_scale,
             self.epistemic_scale,
             continuous_time=self.continuous_time,
-            tmin=self.tmin,
-            tmax=self.tmax,
-            base_dt=self.base_dt,
+            k_min=self.k_min,
+            k_max=self.k_max,
             dt_normalization=self.opax_dt_normalization,
         )
         outs = self.actor_critic.update(model, initial_states, key)

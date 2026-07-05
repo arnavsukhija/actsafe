@@ -169,7 +169,7 @@ class ActSafe:
         # getattr: agents un-pickled from pre-dt-exploration checkpoints lack these.
         if getattr(self, "_dt_exploration_uniform", False) and self.should_explore_dt():
             # Full-range pseudo-time (the offline UniformExploration policy samples
-            # [0, 1), which only covers the upper half of [t_min, t_max]).
+            # [0, 1), which only covers the upper half of [min_repeat, max_repeat]).
             dt_pseudo = jax.random.uniform(
                 next(self.prng), (actions.shape[0],), minval=-1.0, maxval=1.0
             )

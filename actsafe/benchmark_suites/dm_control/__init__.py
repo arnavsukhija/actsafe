@@ -305,23 +305,22 @@ def make(cfg: DictConfig) -> EnvironmentFactory:
                 except (AttributeError, KeyError):
                     return getattr(e, name, default)
             
-            # dm_control exposes the real control dt via control_timestep() (cartpole = 0.01).
+            # dm_control exposes the real control dt via control_timestep() (cartpole =
+            # 0.01); used only for the info['dt'] physical-seconds debug field.
             dt = _get_attr(env, 'dt')
             if dt is None:
                 dt = _get_attr(env, 'control_timestep', lambda: 0.01)()
 
-            tmin = ct_cfg.get("min_time_factor", 1) * dt
-            tmax = ct_cfg.get("max_time_factor", 50) * dt
             switch_cost_val = ct_cfg.get("switch_cost", 1.0)
 
             env = SwitchCostWrapper(
                 env,
-                t_min=tmin,
-                t_max=tmax,
+                min_repeat=ct_cfg.get("min_repeat", 1),
+                max_repeat=ct_cfg.get("max_repeat", 50),
                 switch_cost=ConstantSwitchCost(switch_cost_val),
                 discounting=cfg.agent.discount,              # within-hold reward discount
                 cost_discounting=cfg.agent.safety_discount,  # within-hold cost discount
-                dt=dt,                                       # explicit real control dt
+                dt=dt,                                       # real control dt (reporting only)
             )
             
         return env

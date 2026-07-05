@@ -6,7 +6,7 @@
 #
 # SWEEP:
 #   agent.continuous_time.switch_cost=0.002,0.01,0.05
-#   agent.continuous_time.max_time_factor=4,8,16
+#   agent.continuous_time.max_repeat=4,8,16
 #   training.seed=0,1,2
 defaults:
   - override /environment: safe_adaptation_gym
@@ -31,8 +31,8 @@ agent:
   actor_entropy_coef: 0.01     # entropy bonus keeps the action + dt heads exploring
   continuous_time:
     enabled: true
-    min_time_factor: 1         # shortest hold = act every base step (highest frequency)
-    max_time_factor: 16        # longest hold = 16 base steps (matches AR16)
+    min_repeat: 1              # shortest hold = act every base step (highest frequency)
+    max_repeat: 16             # longest hold = 16 base steps (matches AR16)
     switch_cost: 0.01          # per-decision cost; SWEEP {0.002, 0.01, 0.05}
     dt_exploration: policy     # OFF: the train/ct/buffer/* metrics measure the buffer's
                                # NATURAL dt coverage first; only re-enable "uniform" if those

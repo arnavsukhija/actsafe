@@ -4,7 +4,7 @@ import time
 from typing import Optional
 
 import cloudpickle
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 import numpy as np
 
 from actsafe import benchmark_suites
@@ -84,32 +84,14 @@ class Trainer:
         )
         if self.seeds is None:
             self.seeds = PRNGSequence(self.config.training.seed)
-        # Populate the runtime CT config (base_dt/t_min/t_max) on EVERY entry, not
-        # only when constructing a fresh agent. On requeue-resume the hydra config
-        # lacks these runtime-derived keys; before this ran here, the epoch metrics
-        # fell back to tmin=tmax=0 and logged dt_ratio == 1.0 for every action of
-        # every resumed run (the phantom "dt collapse at requeue" artifact).
-        self._populate_continuous_time_config()
+        # No runtime CT config injection: the dt head is parametrized directly in
+        # repeat units (min_repeat/max_repeat, static config keys), so fresh starts
+        # and pickle resumes see identical config. (The old seconds-based
+        # t_min/t_max/base_dt injection was the source of the resume-path
+        # phantom-dt-collapse telemetry bug.)
         if self.agent is None:
             self.agent = self.make_agent()
         return self
-
-    def _populate_continuous_time_config(self) -> None:
-        assert self.env is not None
-        if not self.config.agent.get("continuous_time", {}).get("enabled", False):
-            return
-        dt_vals = self.env.get_attr("dt")
-        OmegaConf.set_struct(self.config, False)
-        if dt_vals and dt_vals[0] is not None:
-            base_dt = float(dt_vals[0])
-            _LOG.info(f"Dynamically extracted base_dt={base_dt} from environment.")
-        else:
-            base_dt = self.config.agent.continuous_time.get("base_dt", 0.01)
-            _LOG.warning(f"Could not extract 'dt' from environment. Falling back to: {base_dt}")
-        self.config.agent.continuous_time.base_dt = base_dt
-        self.config.agent.continuous_time.t_min = self.config.agent.continuous_time.get("min_time_factor", 1) * base_dt
-        self.config.agent.continuous_time.t_max = self.config.agent.continuous_time.get("max_time_factor", 50) * base_dt
-        OmegaConf.set_struct(self.config, True)
 
     def make_agent(self) -> ActSafe:
         assert self.env is not None
@@ -186,13 +168,12 @@ class Trainer:
         ct_cfg = self.config.agent.get("continuous_time", {})
         ct_enabled = ct_cfg.get("enabled", False)
         if ct_enabled:
-            # No silent fallbacks: missing runtime keys previously produced
-            # dt_ratio == 1.0 metrics for entire resumed runs.
+            # No silent fallbacks: a missing max_repeat previously (in the
+            # seconds-based parametrization) produced dt_ratio == 1.0 metrics
+            # for entire resumed runs.
             assert (
-                ct_cfg.get("t_min") is not None
-                and ct_cfg.get("t_max") is not None
-                and ct_cfg.get("base_dt") is not None
-            ), "continuous_time t_min/t_max/base_dt missing; _populate_continuous_time_config not run"
+                ct_cfg.get("max_repeat") is not None
+            ), "continuous_time.max_repeat missing from the config"
         summary, step = acting.epoch(
             agent,
             env,
@@ -202,9 +183,8 @@ class Trainer:
             self.config.training.render_episodes,
             cost_boundary=self.config.training.safety_budget,
             continuous_time=ct_enabled,
-            tmin=float(ct_cfg.t_min) if ct_enabled else 0.0,
-            tmax=float(ct_cfg.t_max) if ct_enabled else 0.0,
-            base_dt=float(ct_cfg.base_dt) if ct_enabled else 1.0,
+            k_min=float(ct_cfg.get("min_repeat", 1)) if ct_enabled else 1.0,
+            k_max=float(ct_cfg.get("max_repeat")) if ct_enabled else 1.0,
         )
         steps = step - self.step
         self.step = step

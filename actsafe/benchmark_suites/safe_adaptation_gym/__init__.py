@@ -82,20 +82,19 @@ def make(cfg: DictConfig) -> EnvironmentFactory:
 
             ct_cfg = cfg.agent.continuous_time
 
-            # Real control dt (point: 0.004 physics * 5 substeps = 0.02 s). This env exposes
-            # no Gym dt attr, so probing fell back to 0.01 (2x wrong) before _control_dt.
+            # Real control dt (point: 0.004 physics * 5 substeps = 0.02 s), used only
+            # for the info['dt'] physical-seconds debug field; the hold itself is
+            # parametrized directly in repeat units.
             dt = _control_dt(env, task_cfg.robot_name)
-            tmin = ct_cfg.get("min_time_factor", 1) * dt
-            tmax = ct_cfg.get("max_time_factor", 16) * dt
             switch_cost_val = ct_cfg.get("switch_cost", 0.1)
             env = SwitchCostWrapper(
                 env,
-                t_min=tmin,
-                t_max=tmax,
+                min_repeat=ct_cfg.get("min_repeat", 1),
+                max_repeat=ct_cfg.get("max_repeat", 16),
                 switch_cost=ConstantSwitchCost(switch_cost_val),
                 discounting=cfg.agent.discount,          # within-hold reward discount
                 cost_discounting=cfg.agent.safety_discount,  # within-hold cost discount
-                dt=dt,                                   # explicit real control dt
+                dt=dt,                                   # real control dt (reporting only)
             )
         return env
 

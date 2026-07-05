@@ -6,6 +6,8 @@ from gymnasium.core import Wrapper
 from gymnasium.spaces import Box
 from typing import Tuple
 
+from actsafe.rl import ct_time
+
 
 class ActionRepeat(Wrapper):
     def __init__(self, env, repeat):
@@ -89,19 +91,26 @@ class ConstantSwitchCost(SwitchCost):
 
 
 class SwitchCostWrapper(Wrapper):
+    """Executes the agent's (action, pseudo-time) pair as a held action.
+
+    The hold length is expressed in REPEAT UNITS (k base control steps,
+    k in [min_repeat, max_repeat]); physical seconds appear only in the
+    info['dt'] debug field. Episode time accounting is in base steps.
+    """
 
     def __init__(self,
-                 env: gymnasium.Env, 
-                 t_min: float, 
-                 t_max: float, 
+                 env: gymnasium.Env,
+                 min_repeat: int,
+                 max_repeat: int,
                  switch_cost: SwitchCost = ConstantSwitchCost(1.0),
                  discounting: float = 1.0,
                  cost_discounting: float | None = None,
                  dt: float | None = None):
         super().__init__(env)
+        assert 1 <= min_repeat <= max_repeat, "Expects 1 <= min_repeat <= max_repeat."
         self.switch_cost = switch_cost
-        self.tmin = t_min
-        self.tmax = t_max
+        self.k_min = int(min_repeat)
+        self.k_max = int(max_repeat)
         self.discounting = discounting
         # Cost discounted within the hold by the safety discount (defaults to reward discount).
         self.cost_discounting = (
@@ -113,6 +122,7 @@ class SwitchCostWrapper(Wrapper):
             except (AttributeError, KeyError):
                 return getattr(e, name, default)
 
+        # Physical control dt: used ONLY for the info['dt'] debug field.
         # Prefer the explicit control dt passed by the factory; fall back to attr probing.
         if dt is not None:
             self.dt = dt
@@ -125,9 +135,10 @@ class SwitchCostWrapper(Wrapper):
         time_limit = _get_attr(self.env, 'time_limit')
         if time_limit is not None:
             max_steps = time_limit
-            
-        self.time_horizon = max_steps * self.dt
-        self.time_to_go = self.time_horizon        
+
+        # Episode clock counts UP: elapsed base steps since reset (0 -> step_horizon).
+        self.step_horizon = int(max_steps)
+        self.steps_elapsed = 0
         # Augment spaces
         obs_space = self.env.observation_space
         act_space = self.env.action_space
@@ -148,42 +159,39 @@ class SwitchCostWrapper(Wrapper):
 
     def reset(self, *args, **kwargs) -> Tuple[np.ndarray, dict]:
         """
-        Resets the environment and appends the time to the initial observation.
+        Resets the environment and appends the elapsed-time clock (0 at reset)
+        to the initial observation.
         """
         obs, info = self.env.reset(*args, **kwargs)
-        self.time_to_go = self.time_horizon
-        
-        if len(obs.shape) == 1:
-            state = np.concatenate([obs, np.array([self.time_to_go], dtype=obs.dtype)])
-        else:
-            time_channel = np.full_like(obs[:1], self.time_to_go)
-            state = np.concatenate([obs, time_channel], axis=0)
-        return state, info
+        self.steps_elapsed = 0
+        return self._augment_observation(obs), info
 
-    def compute_time(self,
-                      pseudo_time: float,
-                      t_lower: float,
-                      t_upper: float) -> float:
-        
-        time_for_action = ((t_upper - t_lower) / 2.0 * pseudo_time) + (t_upper + t_lower) / 2.0
-        return np.floor(time_for_action / self.dt) * self.dt
-    
+    def _augment_observation(self, obs: np.ndarray) -> np.ndarray:
+        if len(obs.shape) == 1:
+            return np.concatenate(
+                [obs, np.array([self.steps_elapsed], dtype=obs.dtype)]
+            )
+        time_channel = np.full_like(obs[:1], self.steps_elapsed)
+        return np.concatenate([obs, time_channel], axis=0)
+
     def step(self, action) -> Tuple[np.ndarray, float, bool, bool, dict]:
         """
-        Performs the action in the environment and repeats for time_for_action times
+        Performs the action in the environment, held for num_repetitions base steps.
         """
         # separate action components for execution on env
         u, pseudo_time_for_action = action[:-1], action[-1]
-        time_for_action = self.compute_time(pseudo_time_for_action, self.tmin, self.tmax)
-        time_for_action = min(time_for_action, self.time_to_go)
-        
-        num_repetitions = int(round(time_for_action / self.dt))
-        if num_repetitions < 1:
-            num_repetitions = 1
-            
-        # Ensure exact float accounting matching steps
-        time_for_action = num_repetitions * self.dt
-            
+        # The agent's requested hold: affine map of pseudo-time into [k_min, k_max],
+        # floored to an integer number of base steps.
+        num_repetitions = int(
+            ct_time.dt_ratio_from_pseudo(pseudo_time_for_action, self.k_min, self.k_max)
+        )
+        # Never request past the episode horizon (the budget is defined over exactly
+        # step_horizon base steps); always execute at least one step. The clock below
+        # advances by the steps that ACTUALLY executed, so early termination mid-hold
+        # cannot desynchronize the accounting.
+        steps_remaining = self.step_horizon - self.steps_elapsed
+        num_repetitions = min(num_repetitions, max(steps_remaining, 1))
+
         done = False
         truncated = False
         total_reward = 0.0
@@ -216,28 +224,25 @@ class SwitchCostWrapper(Wrapper):
             
         # penalize reward with switch cost
         total_reward = total_reward - self.switch_cost(None, u)
-        
-        # append time to observation
-        self.time_to_go -= time_for_action
-        
+
+        # Advance the elapsed-steps clock by what ACTUALLY executed (the hold can
+        # end early on inner-env termination/truncation).
+        self.steps_elapsed += current_step
+
         # Check truncation due to running out of time
-        if self.time_to_go <= 1e-4:
+        if self.steps_elapsed >= self.step_horizon:
             truncated = True
-            self.time_to_go = 0.0
-            
-        if len(obs.shape) == 1:
-            augmented_obs = np.concatenate([obs, np.array([self.time_to_go], dtype=obs.dtype)])
-        else:
-            time_channel = np.full_like(obs[:1], self.time_to_go)
-            augmented_obs = np.concatenate([obs, time_channel], axis=0)
-        
+            self.steps_elapsed = self.step_horizon
+
+        augmented_obs = self._augment_observation(obs)
+
         info['steps'] = current_step
         info['cost'] = total_cost                    # discounted-within-hold -> critic
         info['cost_realized'] = total_cost_realized  # raw physical sum -> d=25 metric
         # Raw undiscounted task reward, WITHOUT the switch-cost penalty: the true task
         # performance metric. `reward` (returned below) is what the agent optimizes.
         info['reward_realized'] = total_reward_realized
-        info['dt'] = time_for_action
+        info['dt'] = current_step * self.dt          # physical seconds, debug only
         info['intermediate_states'] = intermediate_states
         
         return augmented_obs, float(total_reward), done, truncated, info

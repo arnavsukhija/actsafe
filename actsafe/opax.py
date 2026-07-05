@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 from actsafe.actsafe.rssm import ShiftScale
+from actsafe.rl import ct_time
 from actsafe.rl.types import Prediction
 
 _EPS = 1e-5
@@ -13,10 +14,9 @@ def modify_reward(
     epistemic_scale: float = 1.0,
     stop_grad: bool = True,
     continuous_time: bool = False,
-    tmin: float | None = None,
-    tmax: float | None = None,
-    base_dt: float | None = None,
-    dt_normalization: bool = True,
+    k_min: float | None = None,
+    k_max: float | None = None,
+    dt_normalization: bool = False,
 ) -> tuple[Prediction, ShiftScale]:
     new_rewards = (
         normalized_epistemic_uncertainty(distributions, scale=epistemic_scale) * scale
@@ -25,19 +25,15 @@ def modify_reward(
     if (
         continuous_time
         and dt_normalization
-        and tmin is not None
-        and tmax is not None
-        and base_dt is not None
+        and k_min is not None
+        and k_max is not None
     ):
-        # Normalize Opax reward by the time factor (dt_ratio) -> "uncertainty per unit
-        # physical time". Without it the actor inflates uncertainty by predicting far
-        # ahead, locking dt_ratio to max and freezing the agent (force=0, dt=max).
-        # Ablatable via continuous_time.opax_dt_normalization.
+        # NON-VANILLA, default OFF: normalize the Opax bonus by the hold length
+        # ("uncertainty per base step"). Kept only as an opt-in ablation flag
+        # (continuous_time.opax_dt_normalization); the dt->max failure it was
+        # meant to guard against was never observed with it disabled.
         pseudo_time = trajectory.action[..., -1]
-        time_for_action = ((tmax - tmin) / 2.0 * pseudo_time) + (tmax + tmin) / 2.0
-        # floor matches SwitchCostWrapper's executed-hold quantization exactly.
-        dt_ratio = jnp.maximum(jnp.floor(time_for_action / base_dt), 1.0)
-        # stop_gradient is critical: else Opax minimizes dt_ratio to inflate the reward.
+        dt_ratio = ct_time.dt_ratio_from_pseudo_jnp(pseudo_time, k_min, k_max)
         new_rewards = new_rewards / jax.lax.stop_gradient(dt_ratio)
 
     if stop_grad:
