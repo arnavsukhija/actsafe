@@ -5,10 +5,10 @@ Loads a run's ``state.pkl`` (the pickled Trainer state, on the cluster) and repo
 1. Coverage (Step 1): per hazard-proximity bucket, the distribution of executed
    dt_ratio values in the replay buffer. Proximity proxy = decisions until the
    nearest cost>0 transition within the same episode (0 = the hold itself touched
-   a hazard). A collapsed (near-zero std) dt distribution in the near-hazard
-   buckets while far buckets are diverse confirms the chicken-and-egg coverage
-   gap; uniform-dt warm-up (agent.continuous_time.dt_exploration=uniform) is the
-   fix, and re-running this script afterwards verifies it.
+   a hazard). Decision rule: diverse near-hazard dt => no forced dt exploration
+   needed; a collapsed (near-zero std) near-hazard distribution while far buckets
+   are diverse confirms the coverage gap, and only then is the uniform-dt warm-up
+   (agent.continuous_time.dt_exploration=uniform) justified.
 
 2. Two-curve model diagnostic (Step 3): at K near-hazard states (posterior belief
    inferred by filtering the episode prefix), sweep dt over [1, max_repeat]
@@ -17,12 +17,23 @@ Loads a run's ``state.pkl`` (the pickled Trainer state, on the cluster) and repo
    functions of dt. A dt-flat mean curve after coverage is fixed would indict the
    model, not the data.
 
-Usage (cluster, inside the poetry env):
-    python scripts/diagnose_dt_coverage.py /path/to/run_dir/state.pkl
-    python scripts/diagnose_dt_coverage.py state.pkl --two-curve 8
+NOTE: new runs self-report the coverage numbers per epoch as train/ct/buffer/*
+wandb metrics; this script is only needed for pre-existing checkpoints.
+
+MEMORY: peak usage is dominated by unpickling the replay buffer's observation
+array (capacity x (T+1) x C x H x W uint8 — ~16 GB for the PointGoal TASE
+setup) plus pickle's transient bytes copy, so budget ~2x the buffer size or
+the kernel OOM-kills the load. A pickle cannot be selectively streamed; after
+the load this script immediately frees everything it does not need (in
+coverage-only mode the resident footprint drops to MBs).
+
+Usage (cluster, inside the poetry env — note the --mem):
+    srun --mem=64G python scripts/diagnose_dt_coverage.py /path/to/run_dir/state.pkl
+    srun --mem=64G python scripts/diagnose_dt_coverage.py state.pkl --two-curve 8
 """
 
 import argparse
+import gc
 from collections import OrderedDict
 
 import cloudpickle
@@ -31,10 +42,21 @@ import numpy as np
 from actsafe.rl.ct_time import dt_ratio_from_pseudo, pseudo_from_dt_ratio
 
 
-def load_agent(state_path: str):
+def load_agent(state_path: str, coverage_only: bool):
     with open(state_path, "rb") as f:
         state = cloudpickle.load(f)
-    return state["agent"], state.get("step")
+    agent = state["agent"]
+    step = state.get("step")
+    # Drop the trainer scaffolding (env factory, seeds, ...) right away.
+    del state
+    if coverage_only:
+        # Coverage needs only the buffer's action/cost/length arrays; free the
+        # observation array (the ~16 GB hog) before any analysis. The two-curve
+        # diagnostic needs observations (episode-prefix filtering), so only do
+        # this in coverage-only mode.
+        agent.replay_buffer.observation = None
+    gc.collect()
+    return agent, step
 
 
 def ct_params(ac) -> tuple[float, float]:
@@ -188,10 +210,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state_pkl", help="path to a run's state.pkl")
     parser.add_argument("--two-curve", type=int, default=0, metavar="K",
-                        help="also run the two-curve model diagnostic at K near-hazard states")
+                        help="also run the two-curve model diagnostic at K near-hazard "
+                             "states (loads jax + keeps the observation array resident)")
     args = parser.parse_args()
 
-    agent, step = load_agent(args.state_pkl)
+    agent, step = load_agent(args.state_pkl, coverage_only=args.two_curve == 0)
     print(f"Loaded agent at step {step}; buffer episodes: {agent.replay_buffer._valid_episodes}")
     coverage_report(agent)
     if args.two_curve > 0:
