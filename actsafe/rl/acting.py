@@ -75,6 +75,9 @@ def interact(
                     # Raw task reward without the switch-cost penalty for the reported
                     # objective_raw; falls back to the penalized reward on discrete envs.
                     reward_realized = infos[i].get("reward_realized", rewards[i])
+                    # Executed base steps of the hold — the exposure of the
+                    # factored rate cost head (action_repeat on discrete envs).
+                    exposure = infos[i].get("steps", environment.action_repeat)
                     transition = Transition(
                         observations[i:i+1],
                         next_observations[i:i+1],
@@ -83,6 +86,7 @@ def interact(
                         np.array([cost]),
                         np.array([cost_realized]),
                         np.array([reward_realized]),
+                        np.array([exposure], dtype=np.float32),
                     )
                     per_env_trajectories[i].transitions.append(transition)
                 

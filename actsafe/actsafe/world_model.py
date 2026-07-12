@@ -363,17 +363,20 @@ def variational_step(
             .log_prob(predictions)
             .mean()
         )
+        predictions = inference_result.reward_cost
+        reward_pred, cost_pred = predictions[..., :-1], predictions[..., -1]
         if not with_reward:
-            reward = jnp.zeros_like(features.reward)
-            _, pred_cost = jnp.split(inference_result.reward_cost, 2, -1)
-            reward_cost = jnp.concatenate([reward, pred_cost[..., None]], -1)
+            # Train only the cost channel; the reward term degenerates to a
+            # constant (zeros vs zeros), kept so the logged loss stays
+            # comparable across branches.
+            reward_pred = jnp.zeros_like(features.reward)
+            reward_target = jnp.zeros_like(features.reward)
         else:
-            reward = features.reward
-            reward_cost = inference_result.reward_cost
-        reward_cost_logprobs = logprobs(
-            reward_cost,
-            jnp.concatenate([reward, features.cost[..., None]], -1),
-        )
+            reward_target = features.reward
+        reward_logprobs = logprobs(reward_pred, reward_target)
+        cost_target = features.cost
+        cost_logprobs = logprobs(cost_pred[..., None], cost_target[..., None])
+        reward_cost_logprobs = reward_logprobs + cost_logprobs
         # The image decoder is only trained to reconstruct real image pixels;
         # the clock channel is exact bookkeeping and never learned.
         target_obs = features.observation[:, :, :-1] if model.continuous_time else features.observation
@@ -463,3 +466,207 @@ def evaluate_model(
 
 def _ensemble_first(x):
     return jax.tree_map(lambda x: x.swapaxes(0, 1), x)
+
+
+@eqx.filter_jit
+def cost_calibration(
+    model: WorldModel,
+    features: Features,
+    actions: jax.Array,
+    exposure: jax.Array,
+    key: jax.Array,
+) -> dict[str, jax.Array]:
+    """Per-hold-length calibration + model error on a replay batch.
+
+    gap_* = mean(predicted − target) per exposure bucket (executed base steps
+    k): NEGATIVE = the model under-predicts cost there — the optimistic
+    direction behind the corr(violation, calibration gap) = +0.91 finding.
+    count_* are the raw bucket sizes: a clean gap on an empty bucket proves
+    nothing, so the pass/fail gate is gaps ≈ 0 AT BUCKETS WITH NON-TRIVIAL
+    COUNTS (coverage-first diagnosis, code_review.md §3/§6).
+
+    recon_*/kl_* bucket the image-reconstruction MSE and the posterior‖prior
+    KL by exposure — the probe that tests "the flow model is unvalidated at
+    large k" on the DYNAMICS, not just the cost channel (discriminates the
+    coverage diagnosis from a pure cost-head story).
+    """
+    infer_fn = lambda features, actions: model(features, actions, key)
+    result = eqx.filter_vmap(infer_fn)(features, actions)
+    pred = result.reward_cost[..., -1]
+    target = features.cost
+    gap = pred - target
+    # Per-position world-model error (both [batch, time]).
+    target_obs = (
+        features.observation[:, :, :-1]
+        if model.continuous_time
+        else features.observation
+    )
+    recon_error = ((result.image - target_obs) ** 2).mean(axis=(-3, -2, -1))
+    mvn = lambda scale_shift: dtx.MultivariateNormalDiag(*scale_shift)
+    kl = mvn(result.posteriors).kl_divergence(mvn(result.priors))
+    buckets = {
+        "k_1": exposure <= 1.0,
+        "k_2_4": (exposure >= 2.0) & (exposure <= 4.0),
+        "k_5_8": (exposure >= 5.0) & (exposure <= 8.0),
+        "k_9_plus": exposure >= 9.0,
+    }
+    prefix = "agent/cost_calibration/"
+    model_prefix = "agent/model_per_k/"
+    metrics: dict[str, jax.Array] = {}
+    for name, mask in buckets.items():
+        count = mask.sum()
+        denominator = jnp.maximum(count, 1)
+        bucket_mean = lambda x: jnp.where(count > 0, (x * mask).sum() / denominator, 0.0)
+        metrics[f"{prefix}gap_{name}"] = bucket_mean(gap)
+        metrics[f"{prefix}target_{name}"] = bucket_mean(target)
+        metrics[f"{prefix}frac_{name}"] = mask.mean()
+        metrics[f"{prefix}count_{name}"] = count
+        metrics[f"{model_prefix}recon_{name}"] = bucket_mean(recon_error)
+        metrics[f"{model_prefix}kl_{name}"] = bucket_mean(kl)
+    metrics[f"{prefix}gap_overall"] = gap.mean()
+    # Hazard-positive holds only: zero-inflation hides the optimism in the
+    # overall mean (most holds cost exactly zero and are predicted ≈ zero).
+    positive = target > 0
+    positive_count = positive.sum()
+    metrics[f"{prefix}gap_hazard_holds"] = jnp.where(
+        positive_count > 0,
+        (gap * positive).sum() / jnp.maximum(positive_count, 1),
+        0.0,
+    )
+    metrics[f"{prefix}frac_hazard_holds"] = positive.mean()
+    return metrics
+
+
+@eqx.filter_jit
+def imagined_vs_realized_cost(
+    model: WorldModel,
+    features: Features,
+    actions: jax.Array,
+    exposure: jax.Array,
+    safety_discount: float,
+    key: jax.Array,
+) -> dict[str, jax.Array]:
+    """Open-loop imagined vs realized discounted cost over a replay window.
+
+    Conditions the posterior on the first fifth of each sequence, then rolls
+    the model OPEN-LOOP with the stored actions (same holds, same elapsed-time
+    schedule) and compares the discounted cost sums. This is the only probe
+    that exercises multi-step imagination compounding — cost_calibration above
+    is teacher-forced one-step and cannot see it. NEGATIVE gap = imagination
+    is optimistic about the very trajectories the buffer realized.
+    """
+    horizon = actions.shape[1]
+    context = max(horizon // 5, 1)
+    infer_fn = lambda features, actions: model(features, actions, key)
+    context_features = jax.tree_map(lambda x: x[:, :context], features)
+    result = eqx.filter_vmap(infer_fn)(context_features, actions[:, :context])
+    context_state = jax.tree_map(lambda x: x[:, -1], result.state)
+    if model.continuous_time:
+        # Elapsed-time fraction at the end of conditioning (preprocess maps the
+        # 255*frac clock channel to frac - 0.5).
+        initial_time = features.observation[:, context - 1, -1, 0, 0] + 0.5
+    else:
+        initial_time = jnp.zeros(actions.shape[0])
+
+    def rollout(state, acts, time, key):
+        prediction, _ = model.sample(
+            horizon - context, state, key, acts, initial_time=time
+        )
+        return prediction.cost.mean(0)  # ensemble mean, [horizon - context]
+
+    keys = jax.random.split(key, actions.shape[0])
+    imagined = eqx.filter_vmap(rollout)(
+        context_state, actions[:, context:], initial_time, keys
+    )
+    realized = features.cost[:, context:]
+    window_exposure = exposure[:, context:]
+    # Discount each hold by the base steps elapsed before it (both sides use
+    # the same realized schedule, so the difference isolates the model).
+    elapsed = jnp.cumsum(window_exposure, axis=1) - window_exposure
+    weights = safety_discount**elapsed
+    imagined_return = (weights * imagined).sum(1)
+    realized_return = (weights * realized).sum(1)
+    prefix = "agent/imagination/"
+    return {
+        f"{prefix}cost_return_imagined": imagined_return.mean(),
+        f"{prefix}cost_return_realized": realized_return.mean(),
+        f"{prefix}cost_return_gap": (imagined_return - realized_return).mean(),
+    }
+
+
+@eqx.filter_jit
+def k_slope_diagnostics(
+    model: WorldModel,
+    safety_critic,
+    features: Features,
+    actions: jax.Array,
+    exposure: jax.Array,
+    safety_discount: float,
+    key: jax.Array,
+) -> dict[str, jax.Array]:
+    """Perceived vs realized dt→cost slope (code_review.md §2 mechanism check).
+
+    Perceived: finite difference between k_min and k_max of the decoded hold
+    cost ĉ(s, u, k) and of Q̂_c(s, u, k) = ĉ(s, u, k) + γc^k V̂_c(s'_k, t'),
+    averaged over a replay batch's posterior states with the stored motor
+    actions (counterfactual: same state, same u, different hold). Realized:
+    OLS slope of the stored per-hold cost against exposure. perceived_qc < 0
+    while realized_cost > 0 is the degenerate "longer looks safer" gradient
+    that LBSGD rationally exploits. Batch-mean only — near-hazard states are
+    where the sign matters most, so read alongside near_hazard_* coverage.
+    """
+    infer_fn = lambda features, actions: model(features, actions, key)
+    result = eqx.filter_vmap(infer_fn)(features, actions)
+    flat = result.state.flatten()
+    states = flat.reshape(-1, flat.shape[-1])
+    acts = actions.reshape(-1, actions.shape[-1]).astype(states.dtype)
+    times = (features.observation[:, :, -1, 0, 0] + 0.5).reshape(-1)
+    keys = jax.random.split(key, states.shape[0])
+
+    def perceived(k: float):
+        pseudo = ct_time.pseudo_from_dt_ratio(k, model.k_min, model.k_max)
+
+        def one(state_flat, action, time, key):
+            action = action.at[-1].set(pseudo)
+            state = State.from_flat(state_flat, model.cell.stochastic_size)
+            arrival, _ = model.cell.predict(state, action, key)
+            arrival_flat = arrival.flatten()  # [ensemble, state_dim]
+            tiled = jnp.broadcast_to(
+                action, arrival_flat.shape[:1] + action.shape
+            )
+            cost = jax.vmap(model.reward_cost_decoder)(
+                jnp.concatenate([arrival_flat, tiled], -1)
+            )[..., -1].mean()
+            arrival_time = jnp.minimum(time + k / model.horizon_steps, 1.0)
+            critic_in = jnp.concatenate(
+                [
+                    arrival_flat,
+                    jnp.full((arrival_flat.shape[0], 1), arrival_time, states.dtype),
+                ],
+                -1,
+            )
+            value = jax.vmap(safety_critic)(critic_in).mean()
+            return cost, cost + safety_discount**k * value
+
+        return jax.vmap(one)(states, acts, times, keys)
+
+    cost_lo, q_lo = perceived(model.k_min)
+    cost_hi, q_hi = perceived(model.k_max)
+    dk = max(model.k_max - model.k_min, 1.0)
+    # Realized: batch OLS of stored hold cost on exposure (confounded by where
+    # the policy holds long, but the SIGN contrast vs perceived is the signal).
+    x = exposure.reshape(-1)
+    y = features.cost.reshape(-1)
+    x_centered = x - x.mean()
+    variance = (x_centered**2).mean()
+    realized_slope = jnp.where(
+        variance > 0,
+        (x_centered * (y - y.mean())).mean() / jnp.maximum(variance, 1e-8),
+        0.0,
+    )
+    prefix = "agent/ct/kslope/"
+    return {
+        f"{prefix}perceived_cost": ((cost_hi - cost_lo) / dk).mean(),
+        f"{prefix}perceived_qc": ((q_hi - q_lo) / dk).mean(),
+        f"{prefix}realized_cost": realized_slope,
+    }

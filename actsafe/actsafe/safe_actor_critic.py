@@ -367,6 +367,24 @@ def update_safe_actor_critic(
     new_safety_critic, new_safety_critic_state = safety_critic_learner.grad_step(
         safety_critic, grads, safety_critic_learning_state
     )
+    if continuous_time:
+        # Last-layer output-row gradients of the dt head (mu + stddev rows of
+        # the final Linear). Monitors tanh saturation (gradient starves as the
+        # head parks at k_min/k_max) and the STE Jacobian's (k_max-k_min)/2
+        # scaling across caps; motor rows logged for a comparable scale. The
+        # shared trunk is not attributable per-head, so this is the head-local
+        # signal only.
+        last_layer = actor_grads.net.layers[-1]
+        half = last_layer.weight.shape[0] // 2
+        dt_rows = jnp.array([half - 1, 2 * half - 1])
+        head_sq = lambda rows: (last_layer.weight[rows] ** 2).sum() + (
+            last_layer.bias[rows] ** 2
+        ).sum()
+        metrics["agent/actor/dt_head_grad_norm"] = jnp.sqrt(head_sq(dt_rows))
+        motor_rows = jnp.array(
+            [i for i in range(2 * half) if i not in (half - 1, 2 * half - 1)]
+        )
+        metrics["agent/actor/motor_head_grad_norm"] = jnp.sqrt(head_sq(motor_rows))
     metrics["agent/sentiment/epistemic_uncertainty"] = normalized_epistemic_uncertainty(
         evaluation.priors, 1
     ).mean()

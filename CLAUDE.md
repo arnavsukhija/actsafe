@@ -9,56 +9,125 @@ ActSafe is a model-based RL research implementation for safe exploration with ac
 This fork extends ActSafe toward a **continuous-time / control-frequency safety** research story
 (targeting ICLR 2027).
 
-## Current Project State (as of 2026-07-04)
+## Current Project State (as of 2026-07-11)
 
-**Live investigation: OPAX dt-collapse during TASE exploration, and whether three CT design
-choices are actually necessary.** Not yet resolved — read this before continuing the thread.
+**FIRST-PRINCIPLES REVIEW + COVERAGE-FIRST PURGE LANDED (2026-07-11)** — a strict SMDP
+architectural review (`code_review.md`, repo root — read it before touching the CT stack)
+proved the ZOH/flow foundation sound and replaced the estimator-bias theory with the central
+diagnosis: **phase-wise dt-coverage mismatch** (offline explored only k∈[9,16] via a [0,1)
+sampling bug; OPAX sits at dt=1 from its FIRST controlled step — the rational optimum of its
+objective, not degeneration; the task phase then operates at k the flow model has never seen,
+and the imagination-trained safety critic reads optimistically off-distribution). Landed:
+**expectile cost head DELETED** (never run; the hazard-rate head likewise DROPPED — flow
+identity conflict); `opax_dt_normalization` deleted; `dt_exploration: uniform` default again;
+`UniformExploration` dt dim fixed to [−1,1]; diagnostics battery added (`count_k_*`,
+`agent/model_per_k/{recon,kl}_k_*`, `agent/imagination/cost_return_*`, `agent/ct/kslope/*`,
+`agent/actor/dt_head_grad_norm`); hard-fail guard on pre-exposure pickle resume under CT.
+Launch command + read-order gates: top of `handoff/implementation_plan.md`. The paragraphs
+below describe the 2026-07-07 state and are superseded where they conflict (notably: expectile
+is gone, and the czo8evls "collapse at 250k" read was wrong — 0–200k was the offline phase).
 
-**Background.** TASE agent outputs action `u` + pseudo-time `t ∈ [0,1]`, mapped affinely to hold
-duration `dt`. During the OPAX exploration phase (first `exploration_steps=500000` steps), fresh
-(non-resumed) wandb segments show a clean, reproducible collapse: steps 50–200k have `mean_dt≈12`
-(near max), but steps 250–500k show `mean_dt≡1.00` and `frac_dt_1≡1.00` exactly — 100% of decisions
-pick `dt=1` — before partially recovering by 550k+. Separately, `agent/safety_critic/constraint` is
-positive everywhere across 178 CT runs (0.39–0.74, `frac>0=1.00`) while realized `cost_return`
-violates the budget (25–55 vs budget 2.5) — the model/critic is optimistic about cost in dt-space;
-this is not an enforcement failure.
+**WAVE-1 CALIBRATION-FIX STACK LANDED (2026-07-07)** — the implemented response to the
+2026-07-06 audit below, with a user pivot: **expectile regression** on the cost channel
+(`agent.model.cost_head: expectile`, τ=0.9; asymmetric MSE weighting cost UNDER-prediction τ,
+over-prediction 1−τ) is the first-attempt fix, chosen over the factored hazard-rate head as
+less invasive; the rate head stays fully designed as the escalation path. Also landed:
+- **ct_time nearest-integer mapping** (`floor(x+0.5)`, ties up, clipped): fixes the
+  "max_repeat unreachable" bug; wrapper/STE/diagnostics all follow `actsafe/rl/ct_time.py`.
+  New runs' dt histograms are not bit-comparable to pre-fix runs.
+- **Exposure + raw-cost plumbing**: buffer now stores `cost_realized` (raw hold cost) and
+  `exposure` (executed base steps) alongside the unchanged discounted `cost`; old pickles
+  resume via lazy backfill, but use fresh runs for reported experiments.
+- **Per-k calibration metrics** `agent/cost_calibration/gap_k_*` — THE GATE for any cost-head
+  fix (pass: gaps ≈ 0, no k-trend; watch `gap_hazard_holds`).
+- **dt-adaptiveness metric** `train/ct/buffer/dt_near_far_ratio` (< 1 = decides faster near
+  hazards) + k_max-relative coverage quartiles `frac_dt_q1..q4`.
+- **Pessimism-source flag** `agent.sentiment.constraint_pessimism_source: latent (default) |
+  cost_spread` (κ·ensemble-std of decoded cost; ablation only).
+- **Budget-invariance audit tests** (`tests/test_budget_invariance.py`) + extracted
+  `compute_episode_safety_budget()`.
+DEFERRED to Wave 2 (after the sweep): the auto-tuned interaction budget (dual ascent replacing
+fixed switch_cost) and the factored rate head. Launch commands + wandb read guide: top section
+of `handoff/implementation_plan.md`.
 
-**Bugs found and fixed this session:**
-- Resume-path telemetry loss: `t_min`/`t_max`/`base_dt` were injected only in `make_agent()` on
-  fresh start, not on pickle resume, so post-resume `dt_ratio` logging silently fell back to
-  uninitialized 0/0/1 (mechanically confirmed via `std≡0`). Fixed by moving injection into
-  `Trainer.__enter__` so it runs on both paths. This means: **the 250–500k collapse window is real
-  OPAX behavior, not a resume artifact** — it's only visible pre-fix in fresh segments because
-  resumed segments showed `dt≡1` throughout for the wrong (logging) reason.
-- Objective conflation: `train/objective` was penalized (included `-switch_cost`), not comparable
-  across `switch_cost` sweep values. Fixed by plumbing `reward_realized` (undiscounted, unpenalized)
-  through `SwitchCostWrapper → Transition → Trajectory.as_numpy() → EpochSummary → Trainer`, now
-  logged separately as `train/objective_raw`. Committed as `a5a9674`.
-- `StateWriter` (`actsafe/rl/logging.py:247`) pickle corruption: wrote directly to `state.pkl` in
-  `"wb"` mode (truncates before write), so a SIGKILL mid-write (SLURM requeue or manual kill)
-  destroys the checkpoint with no fallback. **Fixed and already applied** (see current file
-  contents at lines 266–278): writes to `state.pkl.tmp`, `fsync`s, then `os.replace()`s atomically.
+**The 2026-07-06 budget/critic audit is the headline: the safety-budget math is theoretically
+sound in BOTH branches, and every observed safety failure — including the discrete AR study's
+"cost rises with action repeat" figure — is a safety-critic CALIBRATION error, not a budget
+flaw.** Full audit (equations + the 53-run discrete table): `handoff/implementation_plan.md`.
 
-**Open, unresolved questions — user is explicitly skeptical of the current design and wants
-evidence, not theory, before accepting any of these:**
-1. Is `opax_dt_normalization` (dividing the OPAX bonus by `stop_gradient(dt_ratio)`) actually
-   necessary? The theoretical claim (`actsafe/actsafe/opax.py` around line 32) is that without it
-   the actor inflates uncertainty by predicting far ahead and locks `dt` to max. No empirical
-   evidence has been shown for this failure mode specifically.
-2. Is the explicit `dt_exploration=uniform` warm-up phase needed, or does OPAX naturally explore
-   the dt head on its own? Unknown — **the replay buffer's actual dt composition during/after the
-   250–500k collapse has never been directly inspected** (would need `diagnose_dt_coverage.py` on
-   a completed checkpoint's buffer + a two-curve cost-head dt-sensitivity check). No verified pickle
-   checkpoint has been available yet to run this — this is the highest-priority next step.
-3. Should `dt` be a continuous action at all (pseudo-time → affine-mapped hold duration, requiring
-   min/max time-repeat scaling), or would a discrete repeat-counter design (wrapper just receives
-   the repeat value directly, no need to scale `t_min`/`t_max`) be simpler with similar
-   interpolation behavior? Raised by the user, not yet investigated — no code changes made.
+**Audit findings (2026-07-06) — treat these as settled:**
+1. **Discrete budget is sound.** `B(R) = d·R/(T(1−γc))` is an exact unit conversion (per-agent-step
+   cost targets also scale with R; the R cancels → realized allowance is d=25 at every repeat).
+   Budget-filling would predict realized cost FLAT at 25 across R; the observed slope is instead
+   the critic's calibration error: LBSGD servoes the *perceived* cost value to ~90% of budget at
+   every R (e.g. V̂=18.1±0.3 vs B=20 across all 16 AR=8 lineages), and the critic's bias flips
+   sign between AR=4 and AR=8 (pessimistic → optimistic). Run-level corr(violation, calibration
+   gap) = **+0.91**; all 22 violating runs have a positive gap. The high-repeat collapse is purely
+   critic miscalibration. The "coarse control is physically costlier" claim is UNIDENTIFIED in
+   current data (needs matched realized-violation comparisons). The TASE budget
+   `d/(T(1−γc)) = 2.5` is dt-independent and chunk-invariant (telescoping identity) — not
+   exploitable by holding longer.
+2. **Root cause: MSE regression on time-aggregated sparse costs.** The Gaussian/MSE cost decoder
+   regresses zero-inflated accumulated targets with support [0, R] (or [0, k] in TASE); shrinkage
+   toward the conditional mean is one-sided OPTIMISTIC with absolute bias growing with target
+   scale, i.e. with dt. κ·ensemble-std pessimism cannot cover it (systematic, not epistemic;
+   measured gap ≈ 28× std). In TASE this also flattens the learned k-slope, giving the
+   wrong-signed perceived-safety gradient ∂Q̂/∂k < 0 (longer holds *look* safer) — the agent
+   hacks the critic, not the budget (corr(mean_dt, optimism gap) = +0.40 at rep16).
+3. **Planned principled fix — factored hazard-rate head:** replace the learned time-aggregate
+   with a per-base-step hazard probability p̂(s,u) trained via Bernoulli/cross-entropy, and
+   compose the hold cost analytically (Σ_{i<k} γc^i p̂ᵢ, or p̂·(1−γc^k)/(1−γc) under local
+   stationarity). Targets have support {0,1} at every R/k (kills the scale-dependent shrinkage
+   and the discrete sign flip), the k-dependence becomes exact (restores ∂Q̂/∂k > 0 near
+   hazards), and CE on Bernoulli targets is a proper scoring rule (calibrated by construction).
+   NOT yet implemented — audit approved, code pending.
+4. **Exploratory: auto-tuned interaction budget.** Shift from a fixed `switch_cost` to a dynamic
+   per-episode interaction (decision) budget enforced via dual gradient ascent on the switch
+   price — motivated by the finding that a fixed price drifts (becomes relatively cheaper as the
+   policy improves) and produces rational bang-bang dt rather than mistuning. Design stage only.
 
-**Do not commit to an ablation sweep or redesign before verifying #2** (buffer dt composition and
-cost-head dt-sensitivity) on a real checkpoint — that data should settle whether #1 and #3 are
-worth pursuing, per the user's explicit instruction to check data before agreeing with or proposing
-fixes.
+**Previous milestone — the vanilla-faithful TASE cleanup** landed on `wip/tase-pointgoal`
+(7 commits: `af75f9b` … `c2c48a0`); the 24-run sweep on the new stack settled the coverage
+question. Full landing record + sweep read: top section of
+[`handoff/implementation_plan.md`](handoff/implementation_plan.md).
+
+**What the cleanup changed (audit → user directives, 2026-07-05):**
+- `safety_dt_gradient` injection REMOVED; `opax_dt_normalization` default `false` (flag kept for
+  ablations only). Discount `γ^dt_ratio` is FULLY DIFFERENTIABLE — deliberate, vanilla-faithful
+  (supervisor decision 2026-07-05); the only stop-gradients are upstream's OPAX-bonus one and the
+  STE-internal one (the estimator mechanism itself).
+- **Repeat-units parametrization:** config keys are `agent.continuous_time.min_repeat`/`max_repeat`
+  (integer hold bounds in base control steps); physical seconds and the `t_min/t_max/base_dt`
+  runtime injection are GONE (with the resume bug they caused). Single source of truth for the
+  pseudo-time → hold-length map, STE, and buffer-coverage metrics: `actsafe/rl/ct_time.py`.
+- **Full-MDP time:** agent state = (latent, elapsed-time fraction). The clock channel (uint8-safe,
+  `255·elapsed/horizon`, counts UP by EXECUTED steps) stays out of the CNNs but is carried as a
+  scalar into the policy/critics (`state_dim+1`) and propagated analytically in imagination.
+  This is the primary novel contribution — do NOT strip time from the agent's state.
+- STE uses `floor` (matches `SwitchCostWrapper` execution); `StateWriter` checkpoint writes are
+  atomic; per-epoch `train/ct/buffer/*` metrics report the replay buffer's dt-coverage in-run.
+
+**Open questions #1–#3 from the previous investigation — resolved:**
+1. OPAX dt-normalization: default OFF (non-vanilla; the dt≡1 OPAX optimum is correct for an
+   uncosted info-rate objective, not a failure mode). Kept only as an ablation flag.
+2. Natural dt coverage: **measured, and it IS poor.** The 2026-07-05 sweep (dt_exploration=policy)
+   shows `train/ct/buffer/frac_dt_1` = 0.85–0.94 in all 24 runs at 550–600k steps.
+   **Executive decision (user): `dt_exploration: uniform` is now the default in
+   `safe_goal_tase.yaml`** — during the exploration window the executed action's dt head is
+   resampled uniformly over pseudo-time [−1,1] (mechanism in `ActSafe.__call__`). The running
+   policy-mode sweep is kept as the natural-coverage control arm.
+3. Discrete repeat-counter redesign: dropped — the repeat-units refactor already removed the
+   scaling machinery; the continuous head + floor is behaviorally equivalent and vanilla-shaped.
+
+**Current sweep (running):** `max_repeat=8,16 × switch_cost=0.002,0.005,0.01,0.05 × seed=0,1,2`,
+project `actsafe-ct-pointgoal`. Next: launch the identical grid with the updated config
+(uniform dt exploration) as the "after" arm and compare `train/ct/buffer/near_hazard_*` and the
+constraint-optimism gap. The cost-underestimation problem (`agent/safety_critic/constraint`
+positive everywhere while realized cost_return violates the budget) is now **diagnosed** —
+see audit findings #1–#2 above — with the hazard-rate head (#3) as the approved fix path.
+Known small bug to land alongside: the pseudo-time → hold map never reaches `max_repeat`
+(needs `p=1.0` exactly after tanh; fix: map to `[k_min, k_max+1)` before floor, with clip).
+Also pending before any adaptiveness claim: a dt-vs-hazard-proximity metric.
 
 ## Handoff & Current Status — READ THIS FIRST
 
@@ -174,15 +243,18 @@ This fork adds continuous-time / control-frequency machinery on top of upstream 
 **full, current documentation of every change, decision, bug fix, and the running plan lives in
 [`handoff/`](handoff/)** (see "Handoff & Current Status" above). The themes, in brief:
 
-1. **Continuous-time RL & env wrappers** — `SwitchCostWrapper` + adaptive `ActionRepeat` (agent
-   outputs an action plus a duration `dt`); variable-length episode handling in the replay buffer;
-   step counting via `base_dt`; stripping the scalar `time_to_go` channel before the world-model CNN.
+1. **Continuous-time RL & env wrappers** — `SwitchCostWrapper` (agent outputs an action plus a
+   pseudo-time mapped to an integer hold length in `[min_repeat, max_repeat]` base steps — see
+   `actsafe/rl/ct_time.py`, the single source of truth); variable-length episode handling in the
+   replay buffer; a count-up elapsed-time clock channel (uint8-safe `255·elapsed/horizon`) that is
+   kept OUT of the CNNs but carried as a scalar in the agent's state (full-MDP time).
 2. **Discounting & optimization** — variable discount `base_discount ** dt_ratio` with a
-   straight-through estimator. The discount is FULLY DIFFERENTIABLE w.r.t. the dt head — this is
-   deliberate and vanilla-faithful (decided with the supervisor, 2026-07-05). The STE's internal
-   `stop_gradient` is the estimator mechanism itself (round has zero derivative a.e.), not a
-   gradient block. Earlier versions of this doc claimed a `stop_gradient` on `dt_ratio` in the
-   discount; that was removed in `66ea7fe`/`fd6fe3b` and is intentionally absent.
+   straight-through estimator (floor, matching wrapper execution). The discount is FULLY
+   DIFFERENTIABLE w.r.t. the dt head — this is deliberate and vanilla-faithful (decided with the
+   supervisor, 2026-07-05). The STE's internal `stop_gradient` is the estimator mechanism itself
+   (floor has zero derivative a.e.), not a gradient block. Earlier versions of this doc claimed a
+   `stop_gradient` on `dt_ratio` in the discount; that was removed in `66ea7fe`/`fd6fe3b` and is
+   intentionally absent.
 3. **Safety & LBSGD** — world-model `sample()` shape-bug fix; action-repeat-aware safety-budget
    scaling; the LBSGD fallback step scaled downstream of Adam (so the safety-recovery step isn't
    normalized away); `jnp.maximum(constraint, 1e-12)` log-barrier guard.

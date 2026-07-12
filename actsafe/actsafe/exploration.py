@@ -26,7 +26,10 @@ def make_exploration(
     if config.agent.exploration_strategy == "opax":
         return OpaxExploration(config, action_dim, key)
     elif config.agent.exploration_strategy == "uniform":
-        return UniformExploration(action_dim)
+        ct_cfg = config.agent.get("continuous_time", {})
+        return UniformExploration(
+            action_dim, dt_pseudo_dim=ct_cfg.get("enabled", False)
+        )
     else:
         raise NotImplementedError("Unknown exploration strategy")
 
@@ -60,12 +63,6 @@ class OpaxExploration(Exploration):
         )
         self.reward_scale = config.agent.exploration_reward_scale
         self.epistemic_scale = config.agent.exploration_epistemic_scale
-        self.k_min = ct_cfg.get("min_repeat", 1) if self.continuous_time else None
-        self.k_max = ct_cfg.get("max_repeat", None) if self.continuous_time else None
-        # Default OFF: dividing the bonus by dt is not part of vanilla OPAX and the
-        # claimed dt->max failure mode it guards against was never observed with the
-        # flag disabled. Kept as an opt-in flag for ablations only.
-        self.opax_dt_normalization = ct_cfg.get("opax_dt_normalization", False)
 
     def update(
         self,
@@ -77,10 +74,6 @@ class OpaxExploration(Exploration):
             model,
             self.reward_scale,
             self.epistemic_scale,
-            continuous_time=self.continuous_time,
-            k_min=self.k_min,
-            k_max=self.k_max,
-            dt_normalization=self.opax_dt_normalization,
         )
         outs = self.actor_critic.update(model, initial_states, key)
         outs = {f"{_append_opax(k)}": v for k, v in outs.items()}
@@ -97,9 +90,24 @@ def _append_opax(string):
 
 
 class UniformExploration(Exploration):
-    def __init__(self, action_dim: int):
+    def __init__(self, action_dim: int, dt_pseudo_dim: bool = False):
         self.action_dim = action_dim
-        self.policy = lambda _, key: jax.random.uniform(key, (self.action_dim,))
+        if dt_pseudo_dim:
+            # CT: the last action dim is a pseudo-time in [-1, 1]. Sampling it
+            # from upstream's [0, 1) covers only the upper half of
+            # [min_repeat, max_repeat] (e.g. only k in [9, 16] at max_repeat=16)
+            # — the offline-coverage bug diagnosed in code_review.md §3. Motor
+            # dims deliberately stay at upstream's [0, 1) for comparability
+            # with every existing baseline run.
+            def policy(_, key: jax.Array) -> jax.Array:
+                motor_key, dt_key = jax.random.split(key)
+                action = jax.random.uniform(motor_key, (action_dim,))
+                dt_pseudo = jax.random.uniform(dt_key, (), minval=-1.0, maxval=1.0)
+                return action.at[-1].set(dt_pseudo)
+
+            self.policy = policy
+        else:
+            self.policy = lambda _, key: jax.random.uniform(key, (self.action_dim,))
 
     def get_policy(self) -> Policy:
         return self.policy

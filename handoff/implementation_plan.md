@@ -1,4 +1,4 @@
-# ActSafe-CT Implementation Plan (current as of 2026-07-05)
+# ActSafe-CT Implementation Plan (current as of 2026-07-11)
 
 This is the single source of truth for "where we left off." Start here on any new device
 or chat. The historical cartpole investigation is preserved verbatim in **Appendix A** at the
@@ -8,6 +8,372 @@ Companion docs in this `handoff/` folder (mirror of the auto-memory): `MEMORY.md
 `project_strategy_2026-06-23.md` (the decisions), `project_paper_direction.md`,
 `project_bugs_fixed.md`, `project_ct_architecture.md`, `project_cluster_infra.md`,
 `user_profile.md`, `feedback_style.md`.
+
+---
+
+## FIRST-PRINCIPLES REVIEW + COVERAGE-FIRST PURGE LANDED (2026-07-11) — CURRENT STATE
+
+**The full architectural review lives in `code_review.md` (repo root, rewritten 2026-07-11) —
+read it before touching the CT stack.** It proves the SMDP/ZOH/flow foundation sound
+(Bellman/telescoping exact; time augmentation valid; k-gradients flow through three audited
+paths; tanh IS enforced on the dt head) and replaces the estimator-bias story with the user's
+**central diagnosis: phase-wise dt-coverage mismatch**. Code changes below are uncommitted on
+`wip/tase-pointgoal` as of writing; tests must be re-run on Euler (`poetry run pytest -v`)
+before launching — no local env on this machine.
+
+**Corrected OPAX narrative (supersedes the czo8evls read in the 2026-07-07 pre-launch section
+and the safe_goal_tase.yaml comment of that date):** the "healthy spread for 50k–200k then
+collapse at 250k" was a misread — 0–200k IS the offline uniform phase (`offline_steps=200000`);
+its mean_dt≈11.7 matches uniform [0,1) pseudo-times mapping to k∈[9,16] (the offline-range
+bug). **OPAX chose dt=1 from its FIRST controlled step (200k) and never left** — the rational
+optimum of a per-decision log-squashed bonus with no switch cost in the exploration objective
+(V_explore(k) ≈ b(k)/(1−γ^k)). OPAX never "degenerated"; there is currently no objective for
+it to explore higher k. dt-aware OPAX (switch cost in the objective, k-sweep disagreement,
+(state,k) novelty) is a parked study arm — design sketch in code_review.md §4.
+
+**Part A purge (landed):**
+1. **Expectile cost head DELETED entirely** (never run in any observed experiment; one-sided
+   weighting risks its own misalignment; under the coverage diagnosis plain Gaussian/MSE should
+   calibrate once data exists): `world_model.py` fields/branch, `cost_head`/`cost_expectile_tau`
+   keys in `agent/actsafe.yaml` + `safe_goal_tase.yaml`. The factored hazard-rate head is
+   likewise DROPPED (conflicts with the flow-based identity — the model perceives the flow at
+   the end of the hold); estimator-level changes only per the escalation clause below.
+2. **`opax_dt_normalization` DELETED** (flag + plumbing in `opax.py`/`opax_bridge.py`/
+   `exploration.py`/config); idea recorded in code_review.md §4.
+3. **`dt_exploration: uniform` is again the default** in `safe_goal_tase.yaml` (mechanism
+   unchanged in `ActSafe.__call__`: resample only the EXECUTED action's dt head over the full
+   [−1,1], keep motor dims + `prev_action` consistency).
+4. **Offline-coverage bug FIXED**: `UniformExploration(action_dim, dt_pseudo_dim=True)` (CT
+   only) samples the dt dim in [−1,1]; upstream sampled [0,1) → offline executed ONLY k∈[9,16]
+   at max_repeat=16. Motor dims stay [0,1) for baseline comparability. Tests:
+   `tests/test_dt_exploration.py`.
+5. **NOT purged** (audited sound): γ^k + STE, nearest-int mapping, action-conditioned aggregate
+   decoder, full-MDP time, discounted CMDP + B=d/(T(1−γc)), cost_realized/exposure fields,
+   budget-invariance tests, constraint_pessimism_source flag (ablation only).
+
+**Part B diagnostics battery (landed, all per-epoch on one replay batch):**
+- `agent/cost_calibration/count_k_*` — raw bucket sizes alongside the gaps (a clean gap on an
+  empty bucket proves nothing; the gate is gaps ≈ 0 AT NON-TRIVIAL COUNTS).
+- `agent/model_per_k/recon_k_*`, `kl_k_*` — reconstruction MSE + posterior‖prior KL bucketed by
+  exposure: tests "the flow model is unvalidated at large k" on the DYNAMICS (discriminates the
+  coverage diagnosis from a pure cost-head story).
+- `agent/imagination/cost_return_{imagined,realized,gap}` — open-loop rollout with stored
+  actions from matched buffer states vs stored discounted cost (the only probe of multi-step
+  imagination compounding; teacher-forced calibration cannot see it). NEGATIVE gap = optimistic.
+- `agent/ct/kslope/{perceived_cost,perceived_qc,realized_cost}` — finite-difference ĉ(s,u,k)
+  and Q̂_c = ĉ + γc^k·V̂_c(s'_k,t') between k_min/k_max vs the buffer's OLS cost-vs-exposure
+  slope. perceived_qc < 0 while realized > 0 = the degenerate "longer looks safer" gradient.
+- `agent/actor/dt_head_grad_norm` (+ `motor_head_grad_norm`) — tanh-saturation and STE-Jacobian
+  ((k_max−k_min)/2) watch, last-layer dt rows.
+- **Guard:** `ActSafe.update()` now hard-fails when a pre-exposure pickle is resumed with CT
+  enabled (`replay_buffer.aux_backfilled`) instead of training on fabricated exposure≡1.
+
+**Escalation clause:** only if material optimism persists at *well-covered* k (balanced
+`count_k_*`) after this coverage fix do we revisit estimator-level changes.
+
+**Launch (Euler; the "after" arm of the coverage experiment):**
+```bash
+python train_actsafe.py -m hydra/launcher=slurm +experiment=safe_goal_tase +hardware=4090_rtx \
+  +wandb.project=actsafe-ct-pointgoal \
+  agent.continuous_time.max_repeat=8,16 \
+  agent.continuous_time.switch_cost=0.002,0.005,0.01,0.05 \
+  training.seed=0,1,2
+```
+**Read order (gates, in order — if 1 fails nothing downstream is interpretable):**
+(1) coverage during exploration: `train/ct/buffer/frac_dt_q1..q4` roughly balanced,
+`near_hazard_distinct_dt` high, `frac_dt_max > 0`; (2) per-k model error + calibration gaps
+WITH counts; (3) `agent/imagination/cost_return_gap` ≈ 0; (4) constraint sign vs realized
+`cost_return` — the 100%-safe-while-violating signature (run e6cttmuk) must break;
+(5) task phase: `cost_return ≤ 25`, `dt_near_far_ratio < 1`, kslope perceived/realized agree.
+
+---
+
+## PRE-LAUNCH VERIFICATION PASS (2026-07-07, before the Wave-1 sweep) — SUPERSEDED IN PART
+
+> **2026-07-11:** item 1's czo8evls read is WRONG (the 50k–200k "healthy spread" was the
+> offline uniform phase, not OPAX; OPAX sat at dt=1 from its first controlled step) and the
+> `policy` revert plus the expectile head are both undone — see the 2026-07-11 section above.
+> Items 2–4 (checkpoint cadence, wandb run-id fix, calibration plumbing) remain current.
+
+Four checks against the wandb history of the crashed `actsafe-ct-pointgoal` runs (all 248 runs
+in the project are `state=crashed`), done before launching the Wave-1 sweep.
+
+1. **`dt_exploration` reverted to `policy`** (user decision): read of run `czo8evls`
+   (switch_cost=0.05, max_repeat=16, this "policy"/natural mode) shows OPAX's dt distribution
+   is NOT stably diverse — `mean_dt_ratio≈11.7, std≈2.2` (healthy) for steps 50k-200k, then
+   COLLAPSES to `frac_dt_1≈1.0, std_dt_ratio≈0` for steps 250k-500k (the back half of the
+   500k-step exploration budget spent almost entirely at dt=1) — the same poor-coverage finding
+   that motivated the uniform patch in the first place. Reverted anyway per user instruction, but
+   **watch `train/ct/buffer/frac_dt_9_plus` and `agent/cost_calibration/gap_k_9_plus`** in the
+   new sweep: if the k≥9 bucket is data-starved, a clean calibration gate there proves nothing.
+   Once past `exploration_steps`, the same run's dt jumps to and stays at `mean_dt_ratio≈13`
+   with `frac_dt_1≈0` for the rest of training (550k-1.35M) — a roughly fixed high-hold operating
+   point (economically rational under a fixed `switch_cost`), not yet evidence of hazard-tracking
+   adaptive dt (that needs the still-pending dt-vs-hazard-proximity battery, Pillar 3).
+2. **Root cause of "no space left on device" found and fixed**: `ReplayBuffer` preallocates a
+   dense `(capacity=1000, max_length+1=1001, 64, 64, 3)` uint8 observation array ≈ **12.3 GB**,
+   fully materialized regardless of how full the buffer actually is. `checkpoint_every` defaulted
+   to `1` (`configs/config.yaml`), so `Trainer.train()` cloudpickled this ~12GB state EVERY epoch
+   (~every 2 min at observed fps) via `StateWriter`'s tmp-write-then-`os.replace` — safe against
+   corruption, but needs ~2x the file size (~25GB) free during the swap. Fixed:
+   `safe_goal_tase.yaml` now sets `training.checkpoint_every: 10`.
+3. **New finding, not previously documented: wandb run-id fragmentation.** Every crashed+resumed
+   sweep run split its learning curve across 2+ wandb runs. Confirmed on disk: `czo8evls` logs
+   steps 50k→1,350,000 continuously, then `wee7kzun` (a different run id, `switch_cost`/
+   `max_repeat` identical) picks up at exactly step 1,350,000 and continues to 1,650,000 before
+   crashing again — i.e. the resumed process reattached to the pickled `Trainer` state but NOT to
+   the same wandb run, because `WeightAndBiasesWriter` never persisted/derived a run id, so
+   `wandb.init(resume="allow", ...)` minted a fresh one each time. This would have made the
+   per-k calibration curve this sweep exists to validate unreadable as one continuous line after
+   any crash. Fixed in `actsafe/rl/logging.py`: `id` is now `md5(os.getcwd())[:16]` when not
+   explicitly set — the hydra run dir is the same path `Trainer.should_resume()` checks for
+   `state.pkl`, so a resume in the same directory now reattaches to the same wandb run.
+4. **Validation plumbing (`agent/cost_calibration/gap_k_*`, `cost_realized`/`exposure` buffer
+   fields) confirmed correctly wired**: `ActSafe.report()` samples one batch, calls
+   `cost_calibration(model, features, actions, batch.exposure, key)` unconditionally whenever the
+   buffer is non-empty (`actsafe.py:343-356`); `cost_calibration` computes `pred − target` (the
+   SAME `features.cost` the model is trained on) bucketed by executed `exposure` k. Confirmed
+   these keys are genuinely NEW: `czo8evls` (pre-Wave-1) has zero rows for any
+   `agent/cost_calibration/*` key — there is no historical data to compare against; the first
+   Wave-1 run is the first real exercise of this path. Re the "critic performs worse at high k"
+   claim: that was never an independent finding, it IS the calibration-gap story — MSE/Gaussian
+   regression on a target with support `[0,k]` has one-sided-optimistic shrinkage that grows with
+   k (measured ≈28× ensemble std, `corr(violation, calibration gap)=+0.91` in the discrete AR
+   study); expectile regression's asymmetric weighting (τ=0.9 on under-prediction) is the Wave-1
+   attempt to fix exactly this, and `gap_k_1` vs `gap_k_9_plus` flat-at-≈0 is the literal
+   pass/fail readout.
+
+All 25 tests still pass (`test_epoch` deselected, pre-existing/unrelated), ruff clean, no new
+mypy errors from these edits (mypy has pre-existing unrelated errors elsewhere in the package,
+confirmed present before this change via `git stash`).
+
+---
+
+## WAVE-1 CALIBRATION-FIX STACK LANDED (2026-07-07) — SUPERSEDED IN PART
+
+> **2026-07-11:** the expectile head (item 2) was DELETED before ever running, and the factored
+> hazard-rate escalation path was DROPPED (flow-identity conflict) — the first-principles review
+> (`code_review.md`) replaced the estimator-bias theory with the coverage diagnosis; see the
+> 2026-07-11 section above. Items 1, 3–7 (mapping fix, exposure plumbing, calibration metrics,
+> dt_near_far_ratio, pessimism flag, budget tests) remain landed and current.
+
+Implements the fix path approved by the 2026-07-06 audit, with one mid-implementation pivot:
+**the user chose EXPECTILE REGRESSION over the factored hazard-rate head as the first attempt**
+(less invasive; the rate head stays fully designed as the escalation path if expectile fails
+the calibration gate). All 26 tests pass; ruff + mypy clean. Changes uncommitted on
+`wip/tase-pointgoal` as of writing.
+
+**What landed:**
+1. **ct_time mapping fix — max_repeat now reachable** (`actsafe/rl/ct_time.py`): quantization
+   changed from `floor` to NEAREST integer (ties up, implemented as `floor(x+0.5)` because
+   np.round is banker's rounding), clipped to [k_min, k_max]. User's choice over the
+   [k_min,k_max+1)+floor alternative; accepted trade-off: k_min/k_max own half-width pseudo
+   intervals (2× under-sampled under uniform dt-exploration vs interior holds). Wrapper
+   execution, STE forward, and diagnostics all import ct_time.py, so quantization stays
+   consistent everywhere. NOTE: new runs' dt histograms are not bit-comparable to pre-fix runs
+   (mid-range holds shift ~0.5; frac_dt_max was structurally ~0 before, now real).
+2. **Expectile cost head** (`world_model.py`; config `agent.model.cost_head:
+   gaussian|expectile`, `cost_expectile_tau: 0.9`): cost-channel loss becomes asymmetric MSE —
+   UNDER-prediction (the optimistic direction) weighted τ, over-prediction 1−τ; τ=0.5 recovers
+   the gaussian gradients exactly. `safe_goal_tase.yaml` defaults to `expectile`; reward
+   channel and the discrete-path default (gaussian) unchanged.
+3. **Exposure + raw-cost plumbing**: `Transition` gained `exposure` (executed base steps, from
+   `info['steps']`; action_repeat on discrete); the replay buffer stores `cost_realized` (raw
+   hold cost) and `exposure` alongside the UNCHANGED discounted `cost` (legacy head
+   byte-identical). Old pickles resume via lazy `_ensure_aux_arrays` backfill
+   (cost_realized≈cost, exposure=1) — fine for exploratory resumes; use FRESH runs for
+   reported experiments.
+4. **Per-k cost-calibration metrics** (`world_model.cost_calibration`, logged per epoch under
+   `agent/cost_calibration/*`): `gap_k_1/k_2_4/k_5_8/k_9_plus` (mean predicted−target per
+   exposure bucket; NEGATIVE = optimistic), `gap_overall`, `gap_hazard_holds` (hazard-positive
+   holds only — zero-inflation hides optimism in the overall mean), `target_k_*`, `frac_k_*`.
+   **THE GATE: expectile passes iff gaps ≈ 0 with no k-trend; else escalate to the factored
+   rate head.**
+5. **dt-vs-hazard-proximity metric** (`ct_time.buffer_dt_coverage`): new
+   `train/ct/buffer/far_hazard_mean_dt` + `dt_near_far_ratio` (near = ≤1 decision from a
+   hazard, far = ≥5, hazard-containing episodes only; ratio < 1 = decides faster near hazards
+   = the adaptiveness signal), plus k_max-relative quartile buckets `frac_dt_q1..q4` (legacy
+   fixed buckets kept for wandb continuity).
+6. **Pessimism-source flag** (`sentiment.py`; `agent.sentiment.constraint_pessimism_source:
+   latent|cost_spread`): default `latent` = unchanged behavior; `cost_spread` = mean + κ·std of
+   decoded cost over the ensemble (pessimism in cost units) — ablation only.
+7. **Budget-invariance audit tests** (`tests/test_budget_invariance.py`) + refactor
+   `make_actor_critic.compute_episode_safety_budget()`: the 2026-07-06 audit as regression
+   tests — CT budget dt-independent (2.5); discrete realized allowance = d at every R (the
+   R-cancellation); wrapper within-hold discounting telescopes to exact per-base-step
+   discounting for arbitrary (incl. horizon-clipped) hold schedules.
+
+**DEFERRED to Wave 2 (user decision 2026-07-07, designs locked in the assistant plan file):**
+(a) auto-tuned interaction budget — Lagrangian dual on decisions/episode replacing the fixed
+switch_cost (AL term on the imagined discount-weighted mean hold, LBSGD untouched; switch cost
+removed from env reward so reward targets stay stationary) — implement only after the Wave-1
+sweep reads clean; (b) factored hazard-rate head (Binomial on N with exposure k, analytic
+composition ĉ = r̂·(1−γc^k)/(1−γc), exact ∂ĉ/∂k > 0) — the escalation path.
+
+**Launch (config defaults now carry expectile + uniform dt_exploration + mapping fix):**
+```bash
+# Wave-1 sweep ("after" arm; same grid as the running policy-mode control arm)
+python train_actsafe.py -m hydra/launcher=slurm +experiment=safe_goal_tase +hardware=4090_rtx \
+  +wandb.project=actsafe-ct-pointgoal \
+  agent.continuous_time.max_repeat=8,16 \
+  agent.continuous_time.switch_cost=0.002,0.005,0.01,0.05 \
+  training.seed=0,1,2
+# Gaussian-head control on the same stack (isolates the expectile effect):
+#   ... agent.model.cost_head=gaussian
+# Optional pessimism ablation: ... agent.sentiment.constraint_pessimism_source=cost_spread
+# Discrete AR study untouched (cost_head defaults to gaussian there).
+```
+
+**What to read on wandb:** (a) `agent/cost_calibration/gap_k_*` — the gate (≈0, no k-trend;
+watch `gap_hazard_holds` especially); (b) `agent/safety_critic/constraint` optimism vs realized
+`cost_return` — the old everywhere-positive gap should close; (c)
+`train/ct/buffer/dt_near_far_ratio` < 1 in task phase = adaptiveness; (d)
+`train/ct/buffer/frac_dt_max` now > 0 (mapping fix working); (e) `frac_dt_q1..q4` for coverage.
+
+---
+
+## BUDGET/CRITIC AUDIT (2026-07-06) — THE DIAGNOSIS IS SETTLED
+
+**Question audited (user hypothesis):** is the SMDP safety-budget math fundamentally flawed —
+do higher-repeat runs get an artificially inflated budget, explaining both the safety-critic
+collapse and the dt behavior? **Answer: no. The budget math is sound in both branches; every
+observed failure is safety-critic calibration error.** Verified algebraically AND empirically.
+
+### 1. Budget equations (both branches exact)
+- **Discrete branch:** `B(R) = d·R/(T(1−γc))` = 2.5R. Per-agent-step cost targets sum R base
+  steps, so critic value `V ≈ R·c̄/(1−γc)` — the R cancels: `V ≤ B(R) ⇔ c̄·T ≤ d`. Realized
+  allowance is d=25 at EVERY repeat. Key falsifiable prediction: budget-filling would give
+  realized cost flat at 25 across R, never an upward slope.
+- **TASE branch:** `B = d/(T(1−γc))` = 2.5, dt-independent. Chunk-invariance (telescoping):
+  within-hold discounting in `SwitchCostWrapper` + γc^k across decisions compose to exactly
+  `Σ_t γc^t c_t` for ANY hold schedule → holding longer cannot buy allowance. Not exploitable.
+
+### 2. The discrete AR figure decoded (53 task-phase lineages, `safe_goal_ar_study`,
+project `actsafe-ct-pointgoal`, `continuous_time.enabled=false`, tail-avg past 1M steps)
+
+| AR | realized J | J−25 | calibration excess (10·gap/R) |
+|----|-----------|------|-------------------------------|
+| 1  | 16.3 | −8.7 | −6.0 (critic pessimistic) |
+| 2  | 20.9 | −4.1 | −1.4 |
+| 4  | 20.8 | −4.2 | −1.8 |
+| 8  | 28.4 | +3.4 | +5.2 (critic optimistic) |
+| 16 | 27.0 | +2.0 | +10.4 |
+
+- LBSGD servoes the *perceived* cost value to ~90% of budget at every R (AR=8: V̂=18.1±0.3 vs
+  B=20 across all 16 lineages) → `J(R) = α·25 + 10·ε(R)/R` — the ENTIRE slope of the
+  "cost rises with repeat" figure is the critic's bias ε(R), not physics, not budget.
+- Bias flips sign between AR=4 and AR=8 (pessimistic → optimistic). Run-level
+  corr(J−25, calibration excess) = **+0.91** (n=50, degenerates excluded); all 22 violating
+  runs have positive gap; 30/31 under-budget runs have negative/near-zero gap.
+- The physical claim "coarse control is inherently costlier at matched safety" is
+  **unidentified** in this data (enforcement error varies with R); needs matched
+  realized-violation comparisons. Vanilla ActSafe "works" because it lives at R=1 where the
+  bias is small and protective.
+
+### 3. Root cause: MSE on time-aggregated sparse cost targets
+Gaussian/MSE cost decoder regresses zero-inflated accumulated targets, support [0,R] (discrete)
+or [0,k] (TASE). Shrinkage toward the conditional mean is one-sided OPTIMISTIC, absolute bias
+∝ target scale ∝ dt. κ·ensemble-std pessimism cannot cover it (systematic, not epistemic;
+measured gap ≈ 28× ensemble std → would need κ≈28 vs current 0.1). In TASE the flat learned
+k-slope additionally gives the wrong-signed perceived-safety gradient
+`∂Q̂/∂k = γ^k·ln(γ)·V′ < 0` (true sign near hazards is positive) — longer holds LOOK safer, so
+the dt head gets a spurious safety gradient. Empirical signature: critic V falls 1.91→1.29 as
+mean_dt rises 1.3→11.9 while realized value stays flat; corr(mean_dt, optimism gap) = +0.40 at
+rep16, ≈0 at rep8. **The agent hacks the critic, not the budget** (discrete runs: R fixed →
+no agency, pure enforcement error; TASE: dt is an action → the agent steers into the
+optimistic region).
+
+### 4. Approved fix path (audit approved 2026-07-06; code NOT yet written)
+- **Primary — factored hazard-rate head:** learn per-base-step hazard probability p̂(s,u) via
+  Bernoulli/cross-entropy; compose hold cost analytically `Σ_{i<k} γc^i p̂ᵢ` (or
+  `p̂·(1−γc^k)/(1−γc)` under local stationarity). Targets are {0,1} at every R/k → kills
+  scale-dependent shrinkage and the discrete sign flip; k-dependence exact → restores
+  ∂Q̂/∂k > 0 near hazards; CE is a proper scoring rule (calibrated by construction).
+  Secondary options (in order): expectile regression τ>0.5 on the cost head; real-transition
+  TD grounding of the safety critic; base-resolution imagination (exact, compute ∝ k).
+  Threshold-side realized-cost anchoring is the wrong layer (leaves the actor's gradient biased).
+- **Exploratory — auto-tuned interaction budget:** replace fixed `switch_cost` with a dynamic
+  per-episode decision budget enforced by dual gradient ascent on the switch price (a fixed
+  price drifts as the policy improves; observed bang-bang dt is the rational response to a flat
+  price, not mistuning). Design stage only.
+- **Small bug to land alongside:** `ct_time.dt_ratio_from_pseudo` never reaches `max_repeat`
+  (requires p=1.0 exactly, tanh never attains it; frac_dt_max ≤ 0.005 in all 80 lineages).
+  Fix: map [−1,1] → [k_min, k_max+1) before floor, with clip.
+- **Before any adaptiveness claim:** add a dt-vs-hazard-proximity metric (fast decisions near
+  hazards). Also: honest reward comparisons must be at matched REALIZED violation (in current
+  runs the perceived constraint is inactive, so reward is partly unearned).
+
+### Verdict on health
+Formulation core (flat realized budget, chunk-invariant accounting, variable discounting) is
+sound — defend as-is. Genuine signals: monotone dt price-elasticity across 3 orders of
+switch_cost; rational bang-bang allocation; rep16/sc0.05 under budget at mean_dt ≈ 11. Unearned
+claims until the cost head is fixed: the safety claim and the *adaptive*-safety claim. The
+discrete sign-flip table is paper material: the failure is a general property of learned
+time-aggregated cost models, which the factored hazard-rate head fixes for both settings.
+
+---
+
+## VANILLA-FAITHFUL CLEANUP LANDED + NEW SWEEP RUNNING (2026-07-05, evening) — CURRENT STATE
+
+**The full TASE cleanup plan (audit → user directives → 7 commits) landed on `wip/tase-pointgoal`.**
+All 17 tests pass (`test_unsupervised_trainer::test_epoch` deselected — pre-existing failure);
+`ruff check actsafe/` clean.
+
+**Commits (in order):**
+- `af75f9b` — StateWriter atomic checkpoint write (tmp + fsync + os.replace; SIGKILL-safe).
+- `cc9d230` — removed `safety_dt_gradient` injection entirely; `opax_dt_normalization` default
+  `false` (flag kept for ablations); docs corrected (the discount stop-gradient claim was FALSE —
+  the discount `γ^dt_ratio` is fully differentiable, deliberate & vanilla-faithful, decided with
+  the supervisor 2026-07-05).
+- `a454d68` — STE `round` → `floor` so imagination matches SwitchCostWrapper's executed hold.
+- `ae6367f` — repeat-units parametrization: config keys `min_repeat`/`max_repeat` (integers);
+  new single-source-of-truth `actsafe/rl/ct_time.py` (affine map, floor, STE, inverse); deleted
+  `Trainer._populate_continuous_time_config` runtime injection (the resume-bug source);
+  `SwitchCostWrapper` clock counts UP from 0 by EXECUTED steps (user's formulation; fixes a
+  latent bug where the clock advanced by requested time on early truncation).
+- `93cfe25` — full-MDP time: agent state = (latent, elapsed-time fraction). CNNs stay on real
+  pixels; the clock channel is stored uint8-safe as `255·elapsed/horizon`; policy/critics get
+  `state_dim+1`; imagination propagates time analytically (`t' = min(t + k/T, 1)`).
+- `e99129c` — per-epoch `train/ct/buffer/*` metrics in `report()` (dt histogram shares, mean/std,
+  near-hazard coverage) — the in-run answer to the coverage question, no pickle forensics.
+- `c2c48a0` — `diagnose_dt_coverage.py` OOM hardening (coverage-only mode frees the ~16 GB obs
+  array; needs `srun --mem=64G`; supports new k_min/k_max and legacy tmin/tmax/base_dt pickles).
+
+**Locked decisions (user directives, do not relitigate):** no stop-gradients beyond vanilla
+(discount differentiable; OPAX bonus stop-grad kept = upstream; STE-internal stop-grad kept =
+the estimator itself); no switch_cost in the OPAX objective; time stays in the agent's state
+(full MDP — this is the primary novel contribution, don't compare to upstream here);
+`constraint_pessimism=0.1`; oTaCoS action-conditioned reward/cost decoder kept.
+
+**New sweep LAUNCHED (2026-07-05, on the new stack, dt_exploration=policy = natural-coverage arm):**
+`max_repeat=8,16 × switch_cost=0.002,0.005,0.01,0.05 × seed=0,1,2` (24 runs, project
+`actsafe-ct-pointgoal`). First read at 550–600k steps (just past the 500k OPAX phase):
+- **Natural dt coverage is CONFIRMED poor: `train/ct/buffer/frac_dt_1` = 0.85–0.94 in every run**
+  (mean_dt ≈ 1.5–1.85). The buffer is saturated with dt=1 after the OPAX phase — this settles
+  open question #2 with data. Near-hazard contrast exists but is thin
+  (near_hazard_distinct_dt = 7–16, near_hazard_std_dt ≈ 2.3 (mr8) / 4.5 (mr16)).
+- Task-phase policy dt (`train/ct/frac_dt_1`) already scales with switch_cost as expected:
+  sc=0.05 → ~0.01–0.03 (long holds), sc=0.002 → 0.6–0.8 (mostly dt=1).
+- cost_return at this early point: ~18–48, straddling/violating budget 25 (unchanged story).
+
+**Executive decision (user, 2026-07-05): dt_exploration=uniform going forward.** Given the
+confirmed dt=1 buffer saturation (and the OOM'd offline diagnostic), we do not wait further:
+during the exploration window the EXECUTED action's dt head is resampled uniformly over
+pseudo-time [−1,1] (policy force dims kept, `prev_action` kept consistent for the RSSM filter —
+mechanism in `ActSafe.__call__`, actsafe.py). `safe_goal_tase.yaml` now sets
+`dt_exploration: uniform`; the running sweep (policy mode) is kept as the natural-coverage
+CONTROL arm.
+
+**Next actions:**
+1. Let the policy-mode sweep run (control arm; its `train/ct/buffer/*` curves are the "before").
+2. Launch the SAME grid on the updated config (`dt_exploration=uniform`) — the "after" arm:
+   the yaml default now carries uniform, so the identical launch command works; or add the
+   explicit override `agent.continuous_time.dt_exploration=uniform`.
+3. Compare `train/ct/buffer/near_hazard_*` and the safety gap (`agent/safety_critic/constraint`
+   optimism vs realized cost_return) between the arms — the direct test of whether dt-coverage
+   was the bottleneck behind the everywhere-optimistic constraint estimate.
+4. If violation persists WITH verified coverage → audit the within-window cost-discounting leak
+   next (see the empirical-audit section below), not actor-loss mechanisms.
 
 ---
 

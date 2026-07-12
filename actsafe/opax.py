@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 from actsafe.actsafe.rssm import ShiftScale
-from actsafe.rl import ct_time
 from actsafe.rl.types import Prediction
 
 _EPS = 1e-5
@@ -13,29 +12,17 @@ def modify_reward(
     scale: float = 1.0,
     epistemic_scale: float = 1.0,
     stop_grad: bool = True,
-    continuous_time: bool = False,
-    k_min: float | None = None,
-    k_max: float | None = None,
-    dt_normalization: bool = False,
 ) -> tuple[Prediction, ShiftScale]:
+    # NOTE (CT): the bonus is per DECISION, not per base step, and the switch
+    # cost never enters this objective — so dt=1 is the rational optimum of
+    # exploration under a hold (V_explore(k) ≈ b(k)/(1−γ^k) with a
+    # log-squashed bonus). A dt-aware OPAX (switch cost inside the objective,
+    # k-sweep disagreement, (state, k) novelty) is a parked study arm; see
+    # code_review.md §4. The former opax_dt_normalization flag (divide the
+    # bonus by dt) pushed the WRONG way for coverage and was removed.
     new_rewards = (
         normalized_epistemic_uncertainty(distributions, scale=epistemic_scale) * scale
     )
-
-    if (
-        continuous_time
-        and dt_normalization
-        and k_min is not None
-        and k_max is not None
-    ):
-        # NON-VANILLA, default OFF: normalize the Opax bonus by the hold length
-        # ("uncertainty per base step"). Kept only as an opt-in ablation flag
-        # (continuous_time.opax_dt_normalization); the dt->max failure it was
-        # meant to guard against was never observed with it disabled.
-        pseudo_time = trajectory.action[..., -1]
-        dt_ratio = ct_time.dt_ratio_from_pseudo_jnp(pseudo_time, k_min, k_max)
-        new_rewards = new_rewards / jax.lax.stop_gradient(dt_ratio)
-
     if stop_grad:
         new_rewards = jax.lax.stop_gradient(new_rewards)
     return Prediction(

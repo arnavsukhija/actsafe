@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -155,10 +156,21 @@ class WeightAndBiasesWriter:
         assert isinstance(config_dict, dict)
         
         wandb_kwargs = dict(config.wandb)
+        if not wandb_kwargs.get("id"):
+            # Deterministic id from the hydra run dir (== os.getcwd(), the same path
+            # trainer.should_resume() checks for state.pkl): a slurm requeue/pickle
+            # resume always re-enters this same directory, so it now reattaches to
+            # the SAME wandb run instead of forking a new one. Audited 2026-07-07:
+            # every crashed+resumed sweep run in actsafe-ct-pointgoal split across 2+
+            # wandb runs (e.g. czo8evls covers steps 50k-1.35M, wee7kzun continues
+            # 1.35M-1.65M under a fresh random id) — fragmenting any single run's
+            # learning curve, including the per-k calibration metrics this sweep
+            # needs to read cleanly.
+            wandb_kwargs["id"] = hashlib.md5(os.getcwd().encode()).hexdigest()[:16]
         wandb_settings = wandb.Settings(
             init_timeout=3600
         )
-        
+
         try:
             wandb.init(
                 resume="allow", 
@@ -250,6 +262,11 @@ class StateWriter:
         self.state_filename = state_filename
         if not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
+        # A SIGKILL mid-write leaves a stale .tmp roughly the size of the
+        # checkpoint itself; it silently eats disk quota across requeues.
+        stale_tmp = os.path.join(log_dir, state_filename + ".tmp")
+        if os.path.exists(stale_tmp):
+            os.remove(stale_tmp)
         self.queue: Queue[bytes] = Queue(maxsize=5)
         self._thread = Thread(name="state_writer", target=self._worker)
         self._thread.start()
@@ -270,12 +287,25 @@ class StateWriter:
             # (e.g. slurm requeue) can never truncate the previous checkpoint.
             path = os.path.join(self.log_dir, self.state_filename)
             tmp_path = path + ".tmp"
-            with open(tmp_path, "wb") as f:
-                f.write(state_bytes)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
-            self.queue.task_done()
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(state_bytes)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, path)
+            except OSError as e:
+                # Disk-full/quota errors must neither kill the writer thread nor
+                # leave a multi-GB partial .tmp counting against the quota. Keep
+                # the previous checkpoint; the next epoch's write retries.
+                logging.getLogger("state_writer").error(
+                    f"Checkpoint write failed; keeping previous checkpoint: {e}"
+                )
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            finally:
+                self.queue.task_done()
 
     def close(self):
         self.queue.join()

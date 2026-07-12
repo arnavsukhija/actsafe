@@ -10,20 +10,19 @@ from actsafe.actsafe.sentiment import bayes
 _LOG = logging.getLogger(__name__)
 
 
-def make_actor_critic(
-    cfg,
-    safe,
-    state_dim,
-    action_dim,
-    key,
-    objective_sentiment=bayes,
-    constraint_sentiment=bayes,
-):
+def compute_episode_safety_budget(cfg) -> float:
+    """Discounted per-agent-step safety budget handed to the critic constraint.
 
+    Three regimes (audited 2026-07-06, both discounted branches exact):
+    - CT/TASE: B = d / (T * (1 - gamma_c)) — chunk-invariant (telescoping),
+      dt-schedule-independent; holding longer cannot buy allowance.
+    - Discrete discounted: B(R) = (d / episode_steps) / (1 - gamma_c) with
+      episode_steps = T / R — per-agent-step cost targets also scale with R,
+      so the R cancels and realized allowance is d at every repeat.
+    - Undiscounted: B = d.
+    """
     continuous_time_enabled = cfg.agent.get("continuous_time", {}).get("enabled", False)
     if continuous_time_enabled and cfg.agent.safety_discount < 1.0 - np.finfo(np.float32).eps:
-        # CT / TASE: chunk-invariant discounted budget, dt-schedule-independent.
-        # See handoff/implementation_plan.md (budget accounting).
         episode_safety_budget = cfg.training.safety_budget / (
             cfg.training.time_limit * (1.0 - cfg.agent.safety_discount)
         )
@@ -37,6 +36,20 @@ def make_actor_critic(
     else:
         episode_safety_budget = cfg.training.safety_budget
     episode_safety_budget += cfg.agent.safety_slack
+    return episode_safety_budget
+
+
+def make_actor_critic(
+    cfg,
+    safe,
+    state_dim,
+    action_dim,
+    key,
+    objective_sentiment=bayes,
+    constraint_sentiment=bayes,
+):
+
+    episode_safety_budget = compute_episode_safety_budget(cfg)
     _LOG.info(f"Episode safety budget: {episode_safety_budget}")
     if safe:
         if cfg.agent.penalizer.name == "lbsgd":

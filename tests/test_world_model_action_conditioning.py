@@ -85,8 +85,8 @@ def test_imagination_time_recurrence_matches_wrapper():
     key = jax.random.PRNGKey(3)
 
     holds = [3, 7, 16, 1, 5]
-    # k + 0.5 floors to exactly k under the shared affine map.
-    pseudos = [ct_time.pseudo_from_dt_ratio(k + 0.5, 1.0, 16.0) for k in holds]
+    # The exact affine preimage of k rounds to k under the shared map.
+    pseudos = [ct_time.pseudo_from_dt_ratio(k, 1.0, 16.0) for k in holds]
     actions = jnp.zeros((len(holds), ACTION_DIM)).at[:, -1].set(jnp.asarray(pseudos))
 
     prediction, _ = model.sample(
@@ -104,8 +104,8 @@ def test_flat_initial_state_roundtrips_time():
     flat = jnp.zeros((state_dim + 1,)).at[-1].set(0.25)
     policy = lambda state, k: jnp.zeros((ACTION_DIM,))
     prediction, _ = model.sample(4, flat, key, policy)
-    # dt head 0 -> affine(0) in [1,16] is 8.5 -> floor 8 -> +0.08 per step.
-    expected = 0.25 + 0.08 * jnp.arange(1, 5, dtype=jnp.float32)
+    # dt head 0 -> affine(0) in [1,16] is 8.5 -> nearest (ties up) 9 -> +0.09/step.
+    expected = 0.25 + 0.09 * jnp.arange(1, 5, dtype=jnp.float32)
     assert jnp.allclose(prediction.next_state[:, -1], expected, atol=1e-6)
 
 

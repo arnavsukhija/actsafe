@@ -7,15 +7,41 @@ from actsafe.rl import ct_time
 from actsafe.rl.wrappers import ConstantSwitchCost, SwitchCostWrapper
 
 
-@pytest.mark.parametrize("k_min,k_max,base_dt", [(1, 16, 0.02), (1, 8, 0.01), (2, 50, 0.002)])
-def test_repeat_units_map_matches_legacy_seconds_map(k_min, k_max, base_dt):
+@pytest.mark.parametrize("k_min,k_max", [(1, 16), (1, 8), (2, 50)])
+def test_map_is_nearest_integer_and_bounds_reachable(k_min, k_max):
     pseudo = np.linspace(-1.0, 1.0, 4001)
-    # Legacy: pseudo -> seconds in [k_min*base_dt, k_max*base_dt] -> /base_dt -> floor.
-    t_min, t_max = k_min * base_dt, k_max * base_dt
-    seconds = ((t_max - t_min) / 2.0 * pseudo) + (t_max + t_min) / 2.0
-    legacy = np.maximum(np.floor(seconds / base_dt), 1.0)
-    direct = ct_time.dt_ratio_from_pseudo(pseudo, k_min, k_max)
-    np.testing.assert_array_equal(legacy, direct)
+    dt = ct_time.dt_ratio_from_pseudo(pseudo, k_min, k_max)
+    # Nearest-integer quantization of the affine map, clipped to [k_min, k_max].
+    expected = np.clip(
+        np.floor(ct_time.dt_raw_from_pseudo(pseudo, k_min, k_max) + 0.5),
+        k_min,
+        k_max,
+    )
+    np.testing.assert_array_equal(dt, expected)
+    # Both endpoints reachable STRICTLY inside (-1, 1) — a tanh head attains them.
+    assert ct_time.dt_ratio_from_pseudo(np.array(0.999), k_min, k_max) == k_max
+    assert ct_time.dt_ratio_from_pseudo(np.array(-0.999), k_min, k_max) == k_min
+    assert dt.min() == k_min and dt.max() == k_max
+
+
+def test_ties_round_up_not_bankers():
+    # dt_raw = 7.5 must give 8 and 6.5 must give 7 (np.round would give 8 and 6).
+    for target in (6.5, 7.5):
+        pseudo = ct_time.pseudo_from_dt_ratio(target, 1.0, 16.0)
+        assert ct_time.dt_ratio_from_pseudo(pseudo, 1.0, 16.0) == int(target) + 1
+
+
+def test_uniform_pseudo_covers_interior_holds_uniformly():
+    # Interior holds own equal-width pseudo intervals; the two edge holds own
+    # half-width intervals (accepted trade-off of nearest-integer quantization).
+    k_min, k_max = 1, 8
+    pseudo = np.linspace(-1.0, 1.0, 200001)
+    dt = ct_time.dt_ratio_from_pseudo(pseudo, k_min, k_max)
+    counts = np.array([(dt == k).sum() for k in range(k_min, k_max + 1)])
+    interior = counts[1:-1]
+    assert interior.max() - interior.min() <= 2  # equal up to grid resolution
+    for edge in (counts[0], counts[-1]):
+        assert abs(edge - interior[0] / 2) <= 2
 
 
 def test_ste_forward_matches_numpy_and_backward_is_affine():
@@ -42,8 +68,8 @@ def test_buffer_dt_coverage_metrics():
     holds_ep0 = [1, 1, 8, 16]
     holds_ep1 = [2, 4]
     pseudo = np.zeros((3, 4))
-    pseudo[0, :] = [ct_time.pseudo_from_dt_ratio(k + 0.5, k_min, k_max) for k in holds_ep0]
-    pseudo[1, :2] = [ct_time.pseudo_from_dt_ratio(k + 0.5, k_min, k_max) for k in holds_ep1]
+    pseudo[0, :] = [ct_time.pseudo_from_dt_ratio(k, k_min, k_max) for k in holds_ep0]
+    pseudo[1, :2] = [ct_time.pseudo_from_dt_ratio(k, k_min, k_max) for k in holds_ep1]
     cost = np.zeros((3, 4))
     cost[0, 2] = 1.0  # hazard at decision 2 of episode 0
     lengths = np.array([4, 2, 0])  # episode 2 is an empty slot
@@ -91,8 +117,8 @@ def test_wrapper_executes_requested_repeats_and_counts_up():
     base, env = _make_wrapped()
     obs, _ = env.reset()
     assert obs[-1] == 0.0  # elapsed clock starts at zero
-    # pseudo-time for k=7: any p with floor(affine(p)) == 7.
-    pseudo = ct_time.pseudo_from_dt_ratio(7.5, 1, 16)
+    # pseudo-time for k=7: the exact affine preimage of 7 rounds to 7.
+    pseudo = ct_time.pseudo_from_dt_ratio(7.0, 1, 16)
     obs, reward, done, truncated, info = env.step(np.array([0.0, 0.0, pseudo]))
     assert info["steps"] == 7
     assert base.base_steps == 7

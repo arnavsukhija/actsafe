@@ -185,7 +185,7 @@ class SwitchCostWrapper(Wrapper):
         # separate action components for execution on env
         u, pseudo_time_for_action = action[:-1], action[-1]
         # The agent's requested hold: affine map of pseudo-time into [k_min, k_max],
-        # floored to an integer number of base steps.
+        # quantized to the nearest integer number of base steps (ties up).
         num_repetitions = int(
             ct_time.dt_ratio_from_pseudo(pseudo_time_for_action, self.k_min, self.k_max)
         )

@@ -14,7 +14,14 @@ from actsafe.actsafe.make_actor_critic import make_actor_critic
 from actsafe.actsafe.multi_reward import MultiRewardBridge
 from actsafe.actsafe.replay_buffer import ReplayBuffer
 from actsafe.actsafe.sentiment import make_sentiment
-from actsafe.actsafe.world_model import WorldModel, evaluate_model, variational_step
+from actsafe.actsafe.world_model import (
+    WorldModel,
+    cost_calibration,
+    evaluate_model,
+    imagined_vs_realized_cost,
+    k_slope_diagnostics,
+    variational_step,
+)
 from actsafe.rl import ct_time
 from actsafe.rl.epoch_summary import EpochSummary
 from actsafe.rl.metrics import MetricsMonitor
@@ -111,14 +118,19 @@ class ActSafe:
             action_dim,
             next(self.prng),
             make_sentiment(self.config.agent.sentiment.objective_optimism),
-            make_sentiment(self.config.agent.sentiment.constraint_pessimism),
+            make_sentiment(
+                self.config.agent.sentiment.constraint_pessimism,
+                self.config.agent.sentiment.get(
+                    "constraint_pessimism_source", "latent"
+                ),
+            ),
         )
         self.exploration = make_exploration(
             config,
             action_dim,
             next(self.prng),
         )
-        self.offline = UniformExploration(action_dim)
+        self.offline = UniformExploration(action_dim, dt_pseudo_dim=ct_enabled)
         self.state = AgentState.init(
             config.training.parallel_envs, self.model.cell, action_dim
         )
@@ -222,6 +234,18 @@ class ActSafe:
             self.learn_model.count += sim_steps
 
     def update(self):
+        if self.model.continuous_time and getattr(
+            self.replay_buffer, "aux_backfilled", False
+        ):
+            # A pre-exposure checkpoint was resumed with CT enabled: the
+            # backfilled exposure≡1 would make every per-k diagnostic read
+            # clean for a data-corruption reason. Refuse instead of training.
+            raise RuntimeError(
+                "Replay buffer resumed from a pre-exposure checkpoint with "
+                "continuous_time enabled (exposure/cost_realized were "
+                "backfilled). Per-k calibration and coverage metrics would be "
+                "meaningless — start a fresh run."
+            )
         total_steps = self.config.agent.update_steps
         if (
             not self.should_explore()
@@ -237,6 +261,8 @@ class ActSafe:
                 batch.action,
                 batch.reward * self.config.agent.reward_scale,
                 batch.cost,
+                cost_realized=batch.cost_realized,
+                exposure=batch.exposure,
             )
             inferred_rssm_states = self.update_model(batch)
             initial_states = inferred_rssm_states.reshape(
@@ -328,6 +354,43 @@ class ActSafe:
                     self.actor_critic.k_max,
                 )
             )
+        if not self.replay_buffer.empty:
+            # Per-hold-length diagnostics battery (code_review.md §6): cost
+            # calibration + per-k model error (teacher-forced), open-loop
+            # imagination-vs-realized cost, and the perceived-vs-realized
+            # dt→cost slope — all on the same replay batch, once per epoch.
+            batch = next(self.replay_buffer.sample(1))
+            features, actions = _prepare_features(batch)
+            exposure = jnp.asarray(batch.exposure)
+            calibration = cost_calibration(
+                self.model,
+                features,
+                actions,
+                exposure,
+                next(self.prng),
+            )
+            metrics.update({k: float(v) for k, v in calibration.items()})
+            if self.model.continuous_time:
+                imagination = imagined_vs_realized_cost(
+                    self.model,
+                    features,
+                    actions,
+                    exposure,
+                    self.config.agent.safety_discount,
+                    next(self.prng),
+                )
+                metrics.update({k: float(v) for k, v in imagination.items()})
+                if self.model.k_max > self.model.k_min:
+                    k_slope = k_slope_diagnostics(
+                        self.model,
+                        self.actor_critic.safety_critic,
+                        features,
+                        actions,
+                        exposure,
+                        self.config.agent.safety_discount,
+                        next(self.prng),
+                    )
+                    metrics.update({k: float(v) for k, v in k_slope.items()})
         if self.config.agent.evaluate_model:
             batch = next(self.replay_buffer.sample(1))
             features, actions = _prepare_features(batch)

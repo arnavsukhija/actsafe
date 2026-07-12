@@ -21,6 +21,11 @@ class Transition(NamedTuple):
     # discounted-within-hold reward the agent optimizes; this one measures true
     # task performance. None on the discrete path (falls back to `reward`).
     reward_realized: npt.NDArray[Any] | None = None
+    # Executed base steps of the hold (SwitchCostWrapper's info['steps'];
+    # action_repeat on the discrete path). This is the exposure of the
+    # factored rate cost head: the world model learns a per-base-step cost
+    # rate from (cost_realized, exposure) pairs. None falls back to 1.
+    exposure: npt.NDArray[Any] | None = None
 
 
 TrajectoryData = Transition
@@ -39,7 +44,7 @@ class Trajectory:
         # this magic is possible since transition is a named tuple.
         # This allows us make lists of observations, actions, rewards, etc.,
         # instead of list of transitions.
-        o, next_o, a, r, c, cr, rr = zip(*self.transitions)
+        o, next_o, a, r, c, cr, rr, k = zip(*self.transitions)
         # Stack on axis=1 to keep batch dimension first, and time axis second.
         stack = lambda x: np.stack(x, axis=1)
         # cost_realized / reward_realized may be absent (None) for transitions built
@@ -47,7 +52,15 @@ class Trajectory:
         # metrics equal the discrete-path ones there.
         cr_stacked = stack(c) if cr[0] is None else stack(cr)
         rr_stacked = stack(r) if rr[0] is None else stack(rr)
+        k_stacked = np.ones_like(stack(r)) if k[0] is None else stack(k)
         data = TrajectoryData(
-            stack(o), stack(next_o), stack(a), stack(r), stack(c), cr_stacked, rr_stacked
+            stack(o),
+            stack(next_o),
+            stack(a),
+            stack(r),
+            stack(c),
+            cr_stacked,
+            rr_stacked,
+            k_stacked,
         )
         return data

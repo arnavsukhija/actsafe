@@ -20,6 +20,14 @@ training:
   safe: true
   action_repeat: 1            # CT base resolution; the hold is chosen per step by the agent
   safety_budget: 25           # same standard Safety-Gym cost limit as the baseline
+  # REVERTED 2026-07-07 (user decision): the full replay buffer (~12GB of uint8 pixel
+  # obs at capacity=1000 x max_length=1000) is cloudpickled to state.pkl on EVERY
+  # checkpoint; at checkpoint_every=1 (the global default) that's a ~12GB write per
+  # epoch (~every 2 min at this fps), which is the diagnosed root cause of the
+  # "no space left on device" crashes (every run in actsafe-ct-pointgoal died this
+  # way around 1.3-1.65M steps). Atomic tmp+rename also needs ~2x that free during
+  # the write. Check sooner in wall-clock time than the old every-epoch cadence.
+  checkpoint_every: 10
 
 agent:
   exploration_strategy: opax
@@ -34,9 +42,19 @@ agent:
     min_repeat: 1              # shortest hold = act every base step (highest frequency)
     max_repeat: 16             # longest hold = 16 base steps (matches AR16)
     switch_cost: 0.01          # per-decision cost; SWEEP {0.002, 0.01, 0.05}
-    dt_exploration: policy     # OFF: the train/ct/buffer/* metrics measure the buffer's
-                               # NATURAL dt coverage first; only re-enable "uniform" if those
-                               # metrics show collapsed near-hazard coverage
+    # "uniform" (2026-07-11, coverage-first fix from the first-principles review):
+    # resample the EXECUTED action's dt head uniformly over the full pseudo-time
+    # range [-1, 1] during the exploration window. Rationale (code_review.md §3-§4,
+    # corrected narrative): OPAX picks dt=1 from its FIRST controlled step — the
+    # rational optimum of a per-decision log-squashed bonus with no switch cost in
+    # the exploration objective (the earlier "healthy spread then collapse" read of
+    # czo8evls misattributed the offline uniform phase to OPAX). The offline phase
+    # itself only covered k in [9, 16] (UniformExploration sampled [0, 1); fixed to
+    # [-1, 1] on the dt dim). The flow-based model cannot generalize across k it has
+    # never seen, so the task phase ran on an unvalidated model — this restores
+    # coverage. Gates: train/ct/buffer/frac_dt_q1..q4 balanced during exploration,
+    # agent/cost_calibration/gap_k_* ≈ 0 WITH non-trivial count_k_*.
+    dt_exploration: uniform
   # If the dt head saturates (train/ct/frac_dt_1 or frac_dt_max ~1, std_dt_ratio ~0),
   # give it its own init std by uncommenting (see handoff):
   # actor:

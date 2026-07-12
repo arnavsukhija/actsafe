@@ -11,6 +11,10 @@ sentiment:
   model_initialization_scale: null
   constraint_pessimism: null
   objective_optimism: null
+  # "latent" (default, upstream-faithful): kappa * latent epistemic-uncertainty ratio.
+  # "cost_spread" (ablation): kappa * std of the decoded cost across the ensemble —
+  # pessimism in cost units, directly where the heads disagree.
+  constraint_pessimism_source: latent
 model:
   hidden_size: 200
   stochastic_size: 60
@@ -52,11 +56,11 @@ continuous_time:
   enabled: false
   # Hold-length bounds in REPEAT UNITS (base control steps). The dt head's
   # pseudo-time in [-1, 1] maps affinely to [min_repeat, max_repeat] and is
-  # floored; physical seconds never enter the agent (info['dt'] is debug-only).
+  # quantized to the NEAREST integer (ties up — makes max_repeat reachable);
+  # physical seconds never enter the agent (info['dt'] is debug-only).
   min_repeat: 1
   max_repeat: 50
   switch_cost: 0.1
-  opax_dt_normalization: false  # non-vanilla; opt-in for ablations only (divide OPAX bonus by dt)
   dt_exploration: policy  # "uniform": during the warm-up window, replace the dt head of the
                           # EXECUTED action with a uniform pseudo-time in [-1, 1] (policy's
                           # force dims kept), so the buffer contains same-state multi-dt

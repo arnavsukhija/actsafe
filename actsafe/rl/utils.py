@@ -30,6 +30,10 @@ def add_to_buffer(buffer, trajectory, reward_scale):
             trajectory.action,
             trajectory.reward * reward_scale,
             trajectory.cost,
+            # Raw hold cost + executed base steps: targets/exposure for the
+            # cost-calibration metrics (and the factored rate head, if enabled).
+            cost_realized=trajectory.cost_realized,
+            exposure=trajectory.exposure,
         )
     )
 
