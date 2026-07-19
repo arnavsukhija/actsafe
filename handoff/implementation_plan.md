@@ -1,4 +1,4 @@
-# ActSafe-CT Implementation Plan (current as of 2026-07-11)
+# ActSafe-CT Implementation Plan (current as of 2026-07-19)
 
 This is the single source of truth for "where we left off." Start here on any new device
 or chat. The historical cartpole investigation is preserved verbatim in **Appendix A** at the
@@ -11,7 +11,129 @@ Companion docs in this `handoff/` folder (mirror of the auto-memory): `MEMORY.md
 
 ---
 
-## FIRST-PRINCIPLES REVIEW + COVERAGE-FIRST PURGE LANDED (2026-07-11) — CURRENT STATE
+## OPEN-LOOP REVAMP + INTERACTION BUDGET (2026-07-19) — CURRENT STATE
+
+**The eta/LBSGD hypothesis is CLOSED, and the failure is relocated to the one-shot variable-k
+dynamics prediction ("Imagination Blind Spot", user hypothesis, confirmed by the 2026-07-11
+diagnostics battery). The response is an architectural revamp: the world model executes a hold
+as k open-loop micro-predictions — a latent-space SwitchCostWrapper — gated on a new
+`agent.continuous_time.dynamics: flow | openloop` config key. The SMDP decision layer
+(variable frequency as the agent's action, per-decision buffer, γ^k discounting,
+B = d/(T(1−γc)), λ-returns, LBSGD) is UNTOUCHED.** Approved plan 2026-07-19; supersedes the
+2026-07-11 section below where they conflict (notably: the "flow identity is sound, coverage
+is the fix" conclusion — coverage was fixed and the optimism persisted, triggering the
+escalation clause).
+
+### The eta sweep read (2026-07-13/14 runs, project `actsafe-ct-pointgoal`; final values)
+
+48 runs, `eta ∈ {0.05,0.1,0.3}` × `eta_rate ∈ {0, 8e-7, 8e-6}` × `switch_cost ∈ {0.005,0.05}`,
+max_repeat=16, up to 5M steps. One run per config combo:
+
+| run | eta | eta_rate | sc | cost_return | constraint | imag. gap | count_k9+ |
+|---|---|---|---|---|---|---|---|
+| ce604065 | 0.1 | 8e-7 | 0.05 | 25.6 | +0.99 | −0.27 | 247 |
+| 430a9fd3 | 0.1 | 8e-7 | 0.005 | 19.8 | +0.79 | +0.11 | 19 |
+| 237c703a | 0.3 | 0 | 0.05 | 22.5 | +1.65 | −0.05 | 297 |
+| ff7e3f62 | 0.3 | 0 | 0.005 | 20.5 | +1.38 | −0.82 | 11 |
+| 47c08186 | 0.1 | 0 | 0.05 | **34.5** | +0.96 | **−1.46** | 283 |
+| 84e28fd5 | 0.1 | 0 | 0.005 | **36.0** | +0.97 | −0.69 | 3 |
+| 29fa3ae6 | 0.05 | 0 | 0.05 | **40.1** | +0.78 | −0.39 | 293 |
+| f24f198b | 0.05 | 0 | 0.005 | **43.2** | +0.70 | −1.02 | 15 |
+| + 4 × eta_rate=8e-6 | | | | 29–49 | +0.44..0.52 | mostly neg. | 0 |
+
+1. **`agent/safety_critic/constraint` > 0 in 12/12** while 8/12 violate the realized budget
+   (up to +96%). No eta/eta_rate makes the critic *perceive* the violation; stronger barriers
+   buy blanket conservatism only. LBSGD is a downstream victim (code_review.md §1.6) — closed.
+2. **Teacher-forced per-k calibration is now CLEAN** (`gap_k_9_plus` ±0.03 at counts 247–297;
+   `kslope/perceived_qc` > 0). The coverage fix worked at the one-step level; the old
+   estimator-bias story stays dead.
+3. **`agent/imagination/cost_return_gap` < 0 in 9/12** (to −1.46, window return O(1–2)) —
+   multi-step open-loop imagination is optimistic on the very action sequences the buffer
+   realized; the safety critic trains purely on that imagination.
+4. **`agent/model_per_k/recon_k_9_plus` 30–70% above `recon_k_1`** — the one-shot k-jump
+   degrades with k on the dynamics themselves.
+5. Residual (do NOT oversell the fix): sc=0.005 runs violate hard (36–43) at mean_dt ≈ 1.4 —
+   a SHORT-hold regime that long-hold optimism cannot explain. Kept measurable in Sweep A.
+
+### Why open-loop execution (the math, in brief)
+
+- **Formulation unchanged**: Q(x,u,k) = c̄ + γ^k·E V and its chunk-invariance are target-side
+  properties; replacing the monolithic flow F_k(s,u) by the k-fold composition F₁∘…∘F₁ (ZOH)
+  changes the estimator only — and *enforces* the semigroup property F_{k1+k2}=F_{k2}∘F_{k1}
+  that the true time-homogeneous base MDP satisfies and the flow model could violate.
+- **Cross-k generalization**: the k=1-dominated buffer (OPAX + low-sc task phase) becomes the
+  model's densest supervision instead of its blind spot; k-holds come from composition
+  (code_review.md §1.5 conceded a flow model has no such mechanism).
+- **Mid-hold observability**: ĉ(s_i, u) decoded at every micro-latent — imagination *crosses*
+  hazards; c̄ = Σ γc^i ĉ_i is monotone in k for ĉ ≥ 0 (correct-signed dt safety gradient,
+  structurally). Gradients flow through every micro-step (denser signal for motor AND dt head).
+- **Exploration consequence**: OPAX's rational dt=1 preference becomes near-optimal
+  model-learning data for a base-step model; `dt_exploration=uniform` may be obsolete →
+  Sweep-A axis (`uniform` vs `policy`) tests "composition removes the coverage requirement".
+- **Trade-offs**: within-hold compounding replaces one-shot extrapolation (mitigated by dense
+  k=1 supervision + boundary posterior corrections at executed k); arrival-state selection
+  loses the smooth ∂latent/∂p path (discount + fractional-mask cost paths remain);
+  imagination compute × k_max worst case (mitigation: lower plan_horizon).
+
+### The revamp (approved 2026-07-19; full plan in the assistant plan file, mirrored here)
+
+Design rails: **the imagination API contract is frozen** — `model.sample` returns per-decision
+`Prediction(actions, arrival_states(+time), r̄, c̄)` exactly as today, so `safe_actor_critic`,
+LBSGD, λ-returns, budget, OPAX bridge need zero structural changes. `dynamics: flow` stays as
+the A/B ablation arm. Discrete path byte-identical. User decisions: Gaussian/MSE per-step cost
+head (Bernoulli/CE hazard head = escalation only); per-base-step cost/reward vectors stored
+from the wrapper (model-side supervision only — the decision-level MDP is not broken down);
+interaction budget lands with the revamp but validates sequentially.
+
+Commit sequence (wip/tase-pointgoal):
+0. This handoff record.
+1. Per-step data plumbing: `SwitchCostWrapper` emits `info['cost_steps']`/`reward_steps` (raw,
+   undiscounted, no switch cost); `Transition`/`TrajectoryData`/buffer carry them
+   (`(capacity, max_length, k_max)` float32 ≈ 64 MB each); `has_step_arrays` guard hook.
+2. WorldModel openloop training: `_unroll_hold` (k_max-fixed `lax.scan` of `cell.predict`,
+   vmapped per ensemble member, motor-only action input — the cell never sees the dt dim);
+   `__call__` openloop branch = outer scan over decisions, arrival prior selected at
+   exposure−1, posterior at the boundary, KL vs arrival prior (k-step latent overshooting);
+   `variational_step` per-micro-step Gaussian/MSE on `cost_steps`/`reward_steps` masked by
+   exposure; `agent/openloop/agg_residual` consistency metric (monitored, not trained).
+   Openloop reward targets are RAW per-step rewards; the switch price is applied analytically
+   in imagination (commit 5), not baked into targets.
+3. Openloop imagination + acting + diagnostics: `sample` inner k_max unroll + fractional mask
+   w_i = clip(dt_raw − i, 0, 1), c̄ = Σ w_i γc^i ĉ_i, r̄ = Σ w_i γ^i r̂_i, arrival =
+   micro-state[k−1] (stop-grad index), t' = min(t+k/T, 1); `infer_state` unrolls by the
+   previous hold; `k_slope_diagnostics` openloop branch; new `agent/openloop/micro_gap_i_*`.
+4. Agent/config wiring: `dynamics` flag plumbed (`actsafe.yaml` default `flow`,
+   `safe_goal_tase.yaml` → `openloop`); hard-fail guard on old-pickle resume without step
+   arrays; full pytest/ruff/mypy on Euler.
+5. **Interaction Budget** (locked Wave-2 design): config
+   `agent.continuous_time.interaction_budget {enabled, decisions_per_episode N, price_lr,
+   init_price}`; env factory passes `ConstantSwitchCost(0.0)` when enabled (stationary reward
+   targets); `evaluate_actor` subtracts scalar price λ_s per imagined decision before
+   λ-returns; dual ascent per epoch in the agent: λ_s ← max(0, λ_s + price_lr·(D−N)/N) with D
+   = realized decisions/episode from buffer lengths; logs `train/ct/switch_price`,
+   `decisions_per_episode`, `interaction_budget_violation`. LBSGD untouched.
+6. Euler smoke (2 epochs, both dynamics modes; fps check → drop plan_horizon 15→8 if needed;
+   NO local CPU training smoke — it breaks things) then launch.
+
+**Sweep A** (openloop, fixed switch_cost, budget OFF):
+`max_repeat=8,16 × switch_cost=0.002,0.005,0.01,0.05 × dt_exploration=uniform,policy ×
+seed=0,1,2`. Gates in order: (a) `agent/model_per_k/recon_k_*` flattens across k;
+(b) `agent/imagination/cost_return_gap` ≈ 0 (the 9/12-negative signature must break);
+(c) constraint sign vs realized cost_return (safe-while-violating must break);
+(d) cost_return ≤ 25; (e) `dt_near_far_ratio < 1`; (f) the sc=0.005 short-hold residual — if
+it survives (b)+(c) it is enforcement-side, not model-side.
+**Sweep B**: `interaction_budget.enabled=true` on the Sweep-A winner (decisions/episode → N,
+λ_s stabilizes, safety gates hold).
+
+---
+
+## FIRST-PRINCIPLES REVIEW + COVERAGE-FIRST PURGE LANDED (2026-07-11) — SUPERSEDED IN PART
+
+> **2026-07-19:** the coverage fix ran (eta sweep, 2026-07-13/14) and PASSED at the one-step
+> level (per-k gaps ≈ 0 at real counts, perceived_qc sign restored) — but the
+> safe-while-violating signature persisted, triggering this section's own escalation clause.
+> The flow identity itself is now the diagnosed bottleneck; see the 2026-07-19 section above.
+> The diagnostics battery, purge decisions, and OPAX narrative below remain current.
 
 **The full architectural review lives in `code_review.md` (repo root, rewritten 2026-07-11) —
 read it before touching the CT stack.** It proves the SMDP/ZOH/flow foundation sound

@@ -9,7 +9,23 @@ ActSafe is a model-based RL research implementation for safe exploration with ac
 This fork extends ActSafe toward a **continuous-time / control-frequency safety** research story
 (targeting ICLR 2027).
 
-## Current Project State (as of 2026-07-11)
+## Current Project State (as of 2026-07-19)
+
+**OPEN-LOOP WORLD-MODEL REVAMP + INTERACTION BUDGET (2026-07-19) — CURRENT.** The eta/LBSGD
+hypothesis is closed (2026-07-13/14 sweep: constraint > 0 in 12/12 configs while 8/12 violate
+the realized budget; no eta/eta_rate setting calibrates the critic). The diagnostics battery
+relocated the failure to the **one-shot variable-k dynamics prediction**: teacher-forced per-k
+cost gaps are ≈ 0 at real counts (coverage fixed), but `agent/imagination/cost_return_gap` is
+negative in 9/12 runs and per-k reconstruction error grows 30–70% with k. Response
+(approved plan, top of `handoff/implementation_plan.md`): the world model executes a hold as
+k open-loop micro-predictions (latent-space SwitchCostWrapper) behind
+`agent.continuous_time.dynamics: flow | openloop` (`flow` kept as the A/B arm); per-base-step
+cost/reward targets stored from the wrapper; imagination aggregates per-decision via a
+fractional mask (imagination API contract frozen — `safe_actor_critic`/LBSGD/λ-returns/budget
+untouched); plus the auto-tuned **Interaction Budget** (dual ascent on a switch price,
+env-side switch cost zeroed when enabled). The SMDP decision layer is unchanged — variable
+frequency remains the agent's action. The paragraphs below describe the 2026-07-11 state and
+are superseded where they conflict.
 
 **FIRST-PRINCIPLES REVIEW + COVERAGE-FIRST PURGE LANDED (2026-07-11)** — a strict SMDP
 architectural review (`code_review.md`, repo root — read it before touching the CT stack)
