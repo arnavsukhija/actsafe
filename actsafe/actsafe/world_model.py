@@ -105,6 +105,10 @@ class InferenceResult(NamedTuple):
     reward_cost: jax.Array
     posteriors: ShiftScale
     priors: ShiftScale
+    # Openloop only: per-micro-step (reward, cost) decodes along the sampled
+    # member's within-hold path, [time, k_max, num_rewards + 1]. Positions at
+    # index >= exposure are extrapolation; mask before training on them.
+    micro_reward_cost: jax.Array | None = None
 
 
 class WorldModel(eqx.Module):
@@ -118,6 +122,18 @@ class WorldModel(eqx.Module):
     k_min: float = eqx.field(static=True)
     k_max: float = eqx.field(static=True)
     horizon_steps: float = eqx.field(static=True)
+    # CT dynamics estimator (2026-07-19 revamp):
+    # - "flow": one-shot jump — the RSSM consumes the full action (dt dim
+    #   included) and predicts the arrival latent of the whole hold in a single
+    #   GRU step; reward/cost decode whole-hold aggregates from the arrival.
+    # - "openloop": latent-space SwitchCostWrapper — the RSSM is a BASE-STEP
+    #   model (motor action only; k never enters the network) and a hold is the
+    #   k-fold composition of micro-steps, with per-micro-step reward/cost
+    #   decodes composed analytically (within-hold discounts below). The SMDP
+    #   decision layer above is identical in both modes.
+    dynamics: str = eqx.field(static=True)
+    hold_discount: float = eqx.field(static=True)
+    hold_cost_discount: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -133,6 +149,9 @@ class WorldModel(eqx.Module):
         k_min: float = 1.0,
         k_max: float = 1.0,
         horizon_steps: float = 1.0,
+        dynamics: str = "flow",
+        hold_discount: float = 1.0,
+        hold_cost_discount: float = 1.0,
         *,
         key,
     ):
@@ -149,18 +168,28 @@ class WorldModel(eqx.Module):
         # exact scalar ALONGSIDE the latent (extracted from the channel on real
         # steps, advanced analytically by the executed hold length in
         # imagination) — time is bookkeeping, not something to learn.
+        assert dynamics in ("flow", "openloop")
+        if dynamics == "openloop":
+            assert continuous_time, "openloop dynamics require continuous time"
+            assert num_rewards == 1, "openloop supports a single reward channel"
         self.continuous_time = continuous_time
+        self.dynamics = dynamics
+        self.hold_discount = float(hold_discount)
+        self.hold_cost_discount = float(hold_cost_discount)
         self.k_min = float(k_min)
         self.k_max = float(k_max)
         self.horizon_steps = float(horizon_steps)
         image_channels = image_shape[0] - 1 if continuous_time else image_shape[0]
         actual_image_shape = (image_channels,) + image_shape[1:]
+        # Openloop: the base-step cell holds the MOTOR action only (ZOH); the
+        # hold length k is the number of compositions, never a network input.
+        cell_action_dim = action_dim - 1 if dynamics == "openloop" else action_dim
         self.cell = RSSM(
             deterministic_size,
             stochastic_size,
             hidden_size,
             _EMBEDDING_SIZE,
-            action_dim,
+            cell_action_dim,
             ensemble_size,
             initialization_scale,
             key=cell_key,
@@ -177,7 +206,15 @@ class WorldModel(eqx.Module):
         # Composed with the duration-conditioned dynamics this gives each ensemble
         # member a c̄_i(s, u, t), providing imagination a direct learned dt→cost
         # gradient instead of routing it through the prior/posterior KL.
-        decoder_in_dim = state_dim + (action_dim if continuous_time else 0)
+        # Openloop decodes per-base-step (s_i, u) quantities: no dt input — the
+        # k-dependence of the hold cost is structural (composition), not learned.
+        if dynamics == "openloop":
+            decoder_action_dim = action_dim - 1
+        elif continuous_time:
+            decoder_action_dim = action_dim
+        else:
+            decoder_action_dim = 0
+        decoder_in_dim = state_dim + decoder_action_dim
         self.reward_cost_decoder = eqx.nn.MLP(
             decoder_in_dim,
             num_rewards + 1,
@@ -187,12 +224,118 @@ class WorldModel(eqx.Module):
             activation=jnn.elu,
         )
 
+    def _unroll_hold_member(
+        self, prior, state: State, u: jax.Array, key: jax.Array
+    ) -> tuple[State, ShiftScale]:
+        """Open-loop micro-prediction of one hold under ONE ensemble member.
+
+        Composes int(k_max) base-step predictions of the held motor action u
+        from `state` (the latent-space mirror of SwitchCostWrapper's execution
+        loop). Returns the stacked micro-states and their prior distributions,
+        both [k_max, ...]; callers select/mask by the executed hold length.
+        """
+
+        def step(carry, key):
+            shift_scale, deterministic = prior(carry, u)
+            stochastic = dtx.Independent(dtx.Normal(*shift_scale)).sample(seed=key)
+            state = State(stochastic, deterministic)
+            return state, (state, shift_scale)
+
+        keys = jax.random.split(key, int(self.k_max))
+        return jax.lax.scan(step, state, keys)[1]
+
+    def _unroll_hold(
+        self, state: State, u: jax.Array, key: jax.Array
+    ) -> tuple[State, ShiftScale]:
+        """All-member open-loop unroll of one hold: [ensemble, k_max, ...].
+
+        Each member follows its own self-consistent micro-path (imagination
+        needs the full ensemble for the OPAX bonus and constraint pessimism).
+        """
+        unroll = lambda prior, key: self._unroll_hold_member(prior, state, u, key)
+        keys = jnp.asarray(jax.random.split(key, self.cell.ensemble_size))
+        return eqx.filter_vmap(unroll, in_axes=(eqx.if_array(0), 0))(
+            self.cell.priors, keys
+        )
+
+    def _openloop_infer(
+        self,
+        obs_embeddings: jax.Array,
+        actions: jax.Array,
+        key: jax.Array,
+        init_state: State | None,
+        exposure: jax.Array | None,
+    ) -> InferenceResult:
+        k_max = int(self.k_max)
+        if exposure is None:
+            # Diagnostics fallback: the requested hold from the stored dt head
+            # (equals the executed one except at the horizon-clipped last hold).
+            exposure = ct_time.dt_ratio_from_pseudo_jnp(
+                actions[:, -1], self.k_min, self.k_max
+            )
+        arrival_idx = jnp.clip(exposure.astype(jnp.int32) - 1, 0, k_max - 1)
+
+        def fn(carry, inputs):
+            prev_state = carry
+            embedding, action, idx, key = inputs
+            unroll_key, member_key, posterior_key = jax.random.split(key, 3)
+            u = action[:-1]
+            # One member per decision, as in filter(): keeps the ensemble's
+            # bootstrap diversity while paying k_max (not k_max * E) cell steps.
+            member_id = jax.random.randint(member_key, (), 0, self.cell.ensemble_size)
+            prior_member = jax.tree_map(
+                lambda x: x[member_id], self.cell.priors, is_leaf=eqx.is_array
+            )
+            micro_states, micro_priors = self._unroll_hold_member(
+                prior_member, prev_state, u, unroll_key
+            )
+            arrival = jax.tree_map(lambda x: x[idx], micro_states)
+            prior = jax.tree_map(lambda x: x[idx], micro_priors)
+            # Boundary correction: the posterior consumes the post-hold
+            # observation at the arrival deterministic (k-step latent
+            # overshooting — intermediate micro-steps carry no observations).
+            posterior = self.cell.posterior(
+                State(prev_state.stochastic, arrival.deterministic), embedding
+            )
+            stochastic = dtx.Normal(*posterior).sample(seed=posterior_key)
+            state = State(stochastic, arrival.deterministic)
+            # Per-micro-step decode along the member's open-loop path, exactly
+            # what imagination composes: [k_max, num_rewards + 1].
+            micro_flat = micro_states.flatten()
+            tiled_u = jnp.broadcast_to(
+                u.astype(micro_flat.dtype), (k_max,) + u.shape
+            )
+            micro_rc = jax.vmap(self.reward_cost_decoder)(
+                jnp.concatenate([micro_flat, tiled_u], -1)
+            )
+            return state, (state, posterior, prior, micro_rc)
+
+        keys = jax.random.split(key, obs_embeddings.shape[0])
+        _, (states, posteriors, priors, micro_rc) = jax.lax.scan(
+            fn,
+            init_state if init_state is not None else self.cell.init,
+            (obs_embeddings, actions, arrival_idx, keys),
+        )
+        # Whole-hold aggregates via the within-hold discounts, masked by the
+        # executed length — the composed counterpart of the stored discounted
+        # `cost` target (reward differs by the env-side switch cost).
+        steps = jnp.arange(k_max)
+        mask = (steps[None, :] < exposure[:, None]).astype(micro_rc.dtype)
+        reward_weights = (self.hold_discount**steps)[None, :, None] * mask[..., None]
+        cost_weights = (self.hold_cost_discount**steps)[None, :] * mask
+        reward_agg = (micro_rc[..., :-1] * reward_weights).sum(1)
+        cost_agg = (micro_rc[..., -1] * cost_weights).sum(1)
+        reward_cost = jnp.concatenate([reward_agg, cost_agg[..., None]], -1)
+        image = jax.vmap(self.image_decoder)(states.flatten())
+        return InferenceResult(states, image, reward_cost, posteriors, priors, micro_rc)
+
     def __call__(
         self,
         features: Features,
         actions: jax.Array,
         key: jax.Array,
         init_state: State | None = None,
+        exposure: jax.Array | None = None,
     ) -> InferenceResult:
         # Keep the CNN on real pixels: the elapsed-time clock channel (last
         # channel, added by SwitchCostWrapper) has no spatial structure. It is
@@ -200,6 +343,10 @@ class WorldModel(eqx.Module):
         # component of the agent state (see ActSafe.update_model / policy).
         obs = features.observation[:, :-1] if self.continuous_time else features.observation
         obs_embeddings = jax.vmap(self.encoder)(obs)
+        if self.dynamics == "openloop":
+            return self._openloop_infer(
+                obs_embeddings, actions, key, init_state, exposure
+            )
 
         def fn(carry, inputs):
             prev_state = carry
@@ -349,12 +496,23 @@ def variational_step(
     kl_mix: float = 0.8,
     with_reward: bool = True,
     inference_only: bool = False,
+    reward_steps: jax.Array | None = None,
+    cost_steps: jax.Array | None = None,
+    exposure: jax.Array | None = None,
 ) -> tuple[tuple[WorldModel, OptState], tuple[jax.Array, TrainingResults]]:
     def loss_fn(model, static_part=None):
         if static_part is not None:
             model = eqx.combine(model, static_part)
-        infer_fn = lambda features, actions: model(features, actions, key)
-        inference_result: InferenceResult = eqx.filter_vmap(infer_fn)(features, actions)
+        if model.dynamics == "openloop":
+            infer_fn = lambda features, actions, exposure: model(
+                features, actions, key, exposure=exposure
+            )
+            inference_result: InferenceResult = eqx.filter_vmap(infer_fn)(
+                features, actions, exposure
+            )
+        else:
+            infer_fn = lambda features, actions: model(features, actions, key)
+            inference_result = eqx.filter_vmap(infer_fn)(features, actions)
         batch_ndim = 2
         logprobs = (
             lambda predictions, targets: dtx.Independent(
@@ -363,19 +521,46 @@ def variational_step(
             .log_prob(predictions)
             .mean()
         )
-        predictions = inference_result.reward_cost
-        reward_pred, cost_pred = predictions[..., :-1], predictions[..., -1]
-        if not with_reward:
-            # Train only the cost channel; the reward term degenerates to a
-            # constant (zeros vs zeros), kept so the logged loss stays
-            # comparable across branches.
-            reward_pred = jnp.zeros_like(features.reward)
-            reward_target = jnp.zeros_like(features.reward)
+        aux_metrics: dict[str, jax.Array] = {}
+        if model.dynamics == "openloop":
+            # Per-micro-step Gaussian/MSE on the raw base-step targets, masked
+            # beyond the executed hold: every position has a real observation
+            # of one base step, so the target scale is k-independent (no
+            # aggregate shrinkage) and mid-hold hazards supervise the exact
+            # micro-state that crosses them.
+            assert reward_steps is not None and cost_steps is not None
+            assert exposure is not None
+            micro = inference_result.micro_reward_cost
+            steps = jnp.arange(micro.shape[-2])
+            mask = (steps[None, None, :] < exposure[..., None]).astype(micro.dtype)
+            denominator = jnp.maximum(mask.sum(), 1.0)
+            masked_logprob = lambda pred, target: (
+                dtx.Normal(target, 1.0).log_prob(pred) * mask
+            ).sum() / denominator
+            if with_reward:
+                reward_logprobs = masked_logprob(micro[..., 0], reward_steps)
+            else:
+                reward_logprobs = jnp.asarray(0.0)
+            cost_logprobs = masked_logprob(micro[..., -1], cost_steps)
+            # Consistency probe (monitored, never trained on): the composed
+            # discounted hold cost vs the stored aggregate target.
+            aux_metrics["openloop_agg_residual"] = jax.lax.stop_gradient(
+                (inference_result.reward_cost[..., -1] - features.cost).mean()
+            )
         else:
-            reward_target = features.reward
-        reward_logprobs = logprobs(reward_pred, reward_target)
-        cost_target = features.cost
-        cost_logprobs = logprobs(cost_pred[..., None], cost_target[..., None])
+            predictions = inference_result.reward_cost
+            reward_pred, cost_pred = predictions[..., :-1], predictions[..., -1]
+            if not with_reward:
+                # Train only the cost channel; the reward term degenerates to a
+                # constant (zeros vs zeros), kept so the logged loss stays
+                # comparable across branches.
+                reward_pred = jnp.zeros_like(features.reward)
+                reward_target = jnp.zeros_like(features.reward)
+            else:
+                reward_target = features.reward
+            reward_logprobs = logprobs(reward_pred, reward_target)
+            cost_target = features.cost
+            cost_logprobs = logprobs(cost_pred[..., None], cost_target[..., None])
         reward_cost_logprobs = reward_logprobs + cost_logprobs
         # The image decoder is only trained to reconstruct real image pixels;
         # the clock channel is exact bookkeeping and never learned.
@@ -391,6 +576,7 @@ def variational_step(
             kl_loss=kl_loss,
             states=inference_result.state,
         )
+        aux.update(aux_metrics)  # type: ignore[typeddict-item]
         return reconstruction_loss + beta * kl_loss, aux
 
     (loss, rest), model_grads = eqx.filter_value_and_grad(loss_fn, has_aux=True)(model)
