@@ -385,8 +385,104 @@ class WorldModel(eqx.Module):
         # clock channel back as the scalar time component of the agent state.
         obs = observation[:-1] if self.continuous_time else observation
         obs_embeddings = self.encoder(obs)
+        if self.dynamics == "openloop":
+            # Mirror the training-time filter: unroll the prior by the
+            # previously REQUESTED hold (equals the executed one, except at the
+            # horizon-clipped final hold — where the episode ends anyway), then
+            # posterior-correct with the fresh post-hold observation.
+            unroll_key, member_key, posterior_key = jax.random.split(key, 3)
+            u = action[:-1]
+            k_prev = ct_time.dt_ratio_from_pseudo_jnp(
+                action[-1], self.k_min, self.k_max
+            )
+            idx = jnp.clip(k_prev.astype(jnp.int32) - 1, 0, int(self.k_max) - 1)
+            member_id = jax.random.randint(member_key, (), 0, self.cell.ensemble_size)
+            prior_member = jax.tree_map(
+                lambda x: x[member_id], self.cell.priors, is_leaf=eqx.is_array
+            )
+            micro_states, _ = self._unroll_hold_member(
+                prior_member, state, u, unroll_key
+            )
+            arrival = jax.tree_map(lambda x: x[idx], micro_states)
+            posterior = self.cell.posterior(
+                State(state.stochastic, arrival.deterministic), obs_embeddings
+            )
+            stochastic = dtx.Normal(*posterior).sample(seed=posterior_key)
+            return State(stochastic, arrival.deterministic)
         state, *_ = self.cell.filter(state, obs_embeddings, action, key)
         return state
+
+    def _openloop_sample(
+        self,
+        inputs,
+        initial_state: State,
+        initial_time: jax.Array,
+        policy: Policy,
+    ) -> tuple[Prediction, ShiftScale]:
+        """Imagination as latent-space zero-order holds.
+
+        Per decision: unroll every ensemble member k_max base steps under the
+        policy's motor action, decode per-micro-step (r̂, ĉ), and compose the
+        whole-hold aggregates with the within-hold discounts under an
+        STE-masked hold length — forward uses the EXECUTED integer mask
+        (bit-consistent with SwitchCostWrapper), backward the fractional mask
+        w_i = clip(dt_raw - i, 0, 1), whose derivative w.r.t. the dt head is
+        the boundary micro-step's discounted decode (≥ 0 for non-negative ĉ:
+        the correct-signed, structural k-slope). Returns the same per-decision
+        Prediction contract as the flow path, so the actor-critic stack is
+        unchanged.
+        """
+        k_max = int(self.k_max)
+        steps = jnp.arange(k_max)
+
+        def f(carry, inputs):
+            prev_state, prev_time = carry
+            if callable(policy):
+                key = inputs
+                key, p_key = jax.random.split(key)
+                flat = prev_state.flatten()
+                flat = jnp.concatenate([flat, prev_time[None].astype(flat.dtype)])
+                action = policy(jax.lax.stop_gradient(flat), p_key)
+            else:
+                action, key = inputs
+            u, pseudo = action[:-1], action[-1]
+            unroll_key, member_key = jax.random.split(key)
+            micro_states, micro_priors = self._unroll_hold(prev_state, u, unroll_key)
+            micro_flat = micro_states.flatten()  # [ensemble, k_max, state_dim]
+            tiled_u = jnp.broadcast_to(
+                u.astype(micro_flat.dtype), micro_flat.shape[:2] + u.shape
+            )
+            micro_rc = nest_vmap(self.reward_cost_decoder, 2)(
+                jnp.concatenate([micro_flat, tiled_u], -1)
+            )  # [ensemble, k_max, num_rewards + 1]
+            dt_raw = ct_time.dt_raw_from_pseudo(pseudo, self.k_min, self.k_max)
+            k_exec = ct_time.dt_ratio_from_pseudo_jnp(pseudo, self.k_min, self.k_max)
+            frac_mask = jnp.clip(dt_raw - steps, 0.0, 1.0)
+            exec_mask = (steps < k_exec).astype(frac_mask.dtype)
+            mask = frac_mask + jax.lax.stop_gradient(exec_mask - frac_mask)
+            reward_weights = (self.hold_discount**steps) * mask
+            cost_weights = (self.hold_cost_discount**steps) * mask
+            reward = (micro_rc[..., :-1] * reward_weights[None, :, None]).sum(1)
+            cost = (micro_rc[..., -1] * cost_weights[None, :]).sum(1)
+            idx = jnp.clip(k_exec.astype(jnp.int32) - 1, 0, k_max - 1)
+            arrival_states = jax.tree_map(lambda x: x[:, idx], micro_states)
+            prior = jax.tree_map(lambda x: x[:, idx], micro_priors)
+            member_id = jax.random.randint(member_key, (), 0, self.cell.ensemble_size)
+            state = jax.tree_map(lambda x: x[member_id], arrival_states)
+            # Exact bookkeeping, matching SwitchCostWrapper (executed hold).
+            time = jnp.minimum(prev_time + k_exec / self.horizon_steps, 1.0)
+            return (state, time), (action, state, time, reward, cost, prior)
+
+        _, (actions, trajectory, times, reward, cost, priors) = jax.lax.scan(
+            f, (initial_state, initial_time), inputs
+        )
+        # Ensemble axis before time axis (the flow-path contract).
+        reward, cost, priors = _ensemble_first((reward, cost, priors))
+        next_state = trajectory.flatten()
+        next_state = jnp.concatenate(
+            [next_state, times[:, None].astype(next_state.dtype)], -1
+        )
+        return Prediction(actions, next_state, reward, cost), priors
 
     def sample(
         self,
@@ -442,6 +538,8 @@ class WorldModel(eqx.Module):
         if initial_time is None:
             initial_time = jnp.asarray(0.0, jnp.float32)
         initial_time = jnp.asarray(initial_time, jnp.float32)
+        if self.dynamics == "openloop":
+            return self._openloop_sample(inputs, initial_state, initial_time, policy)
         _, (actions, trajectory, times, ensemble_trajectories, priors) = jax.lax.scan(
             f, (initial_state, initial_time), inputs
         )
@@ -809,35 +907,74 @@ def k_slope_diagnostics(
     times = (features.observation[:, :, -1, 0, 0] + 0.5).reshape(-1)
     keys = jax.random.split(key, states.shape[0])
 
-    def perceived(k: float):
-        pseudo = ct_time.pseudo_from_dt_ratio(k, model.k_min, model.k_max)
+    def critic_value(arrival_flat, time, k):
+        arrival_time = jnp.minimum(time + k / model.horizon_steps, 1.0)
+        critic_in = jnp.concatenate(
+            [
+                arrival_flat,
+                jnp.full((arrival_flat.shape[0], 1), arrival_time, states.dtype),
+            ],
+            -1,
+        )
+        return jax.vmap(safety_critic)(critic_in).mean()
+
+    if model.dynamics == "openloop":
+        # Counterfactual on the SAME open-loop micro-path: c̄(k) is the masked
+        # discounted sum of per-micro-step decodes — the k-dependence is
+        # structural, so this measures the slope imagination actually uses.
+        k_steps = jnp.arange(int(model.k_max))
 
         def one(state_flat, action, time, key):
-            action = action.at[-1].set(pseudo)
             state = State.from_flat(state_flat, model.cell.stochastic_size)
-            arrival, _ = model.cell.predict(state, action, key)
-            arrival_flat = arrival.flatten()  # [ensemble, state_dim]
+            u = action[:-1]
+            micro_states, _ = model._unroll_hold(state, u, key)
+            micro_flat = micro_states.flatten()
             tiled = jnp.broadcast_to(
-                action, arrival_flat.shape[:1] + action.shape
+                u.astype(micro_flat.dtype), micro_flat.shape[:2] + u.shape
             )
-            cost = jax.vmap(model.reward_cost_decoder)(
-                jnp.concatenate([arrival_flat, tiled], -1)
-            )[..., -1].mean()
-            arrival_time = jnp.minimum(time + k / model.horizon_steps, 1.0)
-            critic_in = jnp.concatenate(
-                [
-                    arrival_flat,
-                    jnp.full((arrival_flat.shape[0], 1), arrival_time, states.dtype),
-                ],
-                -1,
-            )
-            value = jax.vmap(safety_critic)(critic_in).mean()
-            return cost, cost + safety_discount**k * value
+            micro_cost = nest_vmap(model.reward_cost_decoder, 2)(
+                jnp.concatenate([micro_flat, tiled], -1)
+            )[..., -1]  # [ensemble, k_max]
 
-        return jax.vmap(one)(states, acts, times, keys)
+            def at_k(k: int):
+                mask = (k_steps < k).astype(micro_cost.dtype)
+                cost = (micro_cost * (safety_discount**k_steps * mask)[None]).sum(
+                    1
+                ).mean()
+                arrival_flat = jax.tree_map(
+                    lambda x: x[:, k - 1], micro_states
+                ).flatten()
+                value = critic_value(arrival_flat, time, float(k))
+                return cost, cost + safety_discount**k * value
 
-    cost_lo, q_lo = perceived(model.k_min)
-    cost_hi, q_hi = perceived(model.k_max)
+            (cost_lo, q_lo) = at_k(int(model.k_min))
+            (cost_hi, q_hi) = at_k(int(model.k_max))
+            return cost_lo, q_lo, cost_hi, q_hi
+
+        cost_lo, q_lo, cost_hi, q_hi = jax.vmap(one)(states, acts, times, keys)
+    else:
+
+        def perceived(k: float):
+            pseudo = ct_time.pseudo_from_dt_ratio(k, model.k_min, model.k_max)
+
+            def one(state_flat, action, time, key):
+                action = action.at[-1].set(pseudo)
+                state = State.from_flat(state_flat, model.cell.stochastic_size)
+                arrival, _ = model.cell.predict(state, action, key)
+                arrival_flat = arrival.flatten()  # [ensemble, state_dim]
+                tiled = jnp.broadcast_to(
+                    action, arrival_flat.shape[:1] + action.shape
+                )
+                cost = jax.vmap(model.reward_cost_decoder)(
+                    jnp.concatenate([arrival_flat, tiled], -1)
+                )[..., -1].mean()
+                value = critic_value(arrival_flat, time, k)
+                return cost, cost + safety_discount**k * value
+
+            return jax.vmap(one)(states, acts, times, keys)
+
+        cost_lo, q_lo = perceived(model.k_min)
+        cost_hi, q_hi = perceived(model.k_max)
     dk = max(model.k_max - model.k_min, 1.0)
     # Realized: batch OLS of stored hold cost on exposure (confounded by where
     # the policy holds long, but the SIGN contrast vs perceived is the signal).
@@ -856,3 +993,58 @@ def k_slope_diagnostics(
         f"{prefix}perceived_qc": ((q_hi - q_lo) / dk).mean(),
         f"{prefix}realized_cost": realized_slope,
     }
+
+
+@eqx.filter_jit
+def openloop_micro_calibration(
+    model: WorldModel,
+    features: Features,
+    actions: jax.Array,
+    exposure: jax.Array,
+    cost_steps: jax.Array,
+    key: jax.Array,
+) -> dict[str, jax.Array]:
+    """Per within-hold-index calibration of the micro-step cost head.
+
+    micro_gap_i_* = mean(ĉ(s_i, u) − cost_steps[i]) over positions where the
+    hold actually executed micro-step i. Directly answers "does imagination
+    see the mid-hold hazard at the right offset" — the flow model could not be
+    probed inside a hold at all. NEGATIVE = optimistic. agg_residual is the
+    composed discounted hold cost vs the stored aggregate target (the wrapper
+    identity, on real data).
+    """
+    infer_fn = lambda features, actions, exposure: model(
+        features, actions, key, exposure=exposure
+    )
+    result = eqx.filter_vmap(infer_fn)(features, actions, exposure)
+    micro_cost = result.micro_reward_cost[..., -1]  # [batch, time, k_max]
+    gap = micro_cost - cost_steps
+    k_max = micro_cost.shape[-1]
+    steps = jnp.arange(k_max)
+    valid = steps[None, None, :] < exposure[..., None]
+    prefix = "agent/openloop/"
+    metrics: dict[str, jax.Array] = {}
+    for i in (0, 1, 3, 7, 15):
+        if i >= k_max:
+            continue
+        mask = valid[..., i]
+        count = mask.sum()
+        metrics[f"{prefix}micro_gap_i_{i}"] = jnp.where(
+            count > 0, (gap[..., i] * mask).sum() / jnp.maximum(count, 1), 0.0
+        )
+        metrics[f"{prefix}micro_count_i_{i}"] = count
+    count = valid.sum()
+    metrics[f"{prefix}micro_gap_overall"] = (gap * valid).sum() / jnp.maximum(count, 1)
+    # Hazard-positive micro-steps only (zero-inflation hides optimism).
+    positive = (cost_steps > 0) & valid
+    positive_count = positive.sum()
+    metrics[f"{prefix}micro_gap_hazard"] = jnp.where(
+        positive_count > 0,
+        (gap * positive).sum() / jnp.maximum(positive_count, 1),
+        0.0,
+    )
+    metrics[f"{prefix}micro_count_hazard"] = positive_count
+    metrics[f"{prefix}agg_residual"] = (
+        result.reward_cost[..., -1] - features.cost
+    ).mean()
+    return metrics

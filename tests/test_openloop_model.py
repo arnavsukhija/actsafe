@@ -185,6 +185,94 @@ def test_flow_path_unchanged():
     assert result.micro_reward_cost is None
 
 
+def test_openloop_sample_keeps_prediction_contract():
+    from actsafe.rl import ct_time
+
+    model = make_model()
+    key = jax.random.PRNGKey(15)
+    # Callable policy (actor-critic path).
+    policy = lambda state, k: jnp.zeros((ACTION_DIM,))
+    prediction, priors = model.sample(7, model.cell.init, key, policy)
+    assert prediction.reward.shape == (ENSEMBLE, 7, 1)
+    assert prediction.cost.shape == (ENSEMBLE, 7)
+    assert prediction.next_state.shape == (7, 8 + 32 + 1)  # latent + time
+    assert priors.shift.shape == (ENSEMBLE, 7, 8)
+    # Array policy (evaluate_model / imagined_vs_realized path) + exact time
+    # recurrence by the EXECUTED holds.
+    holds = [2, 4, 1]
+    pseudos = [ct_time.pseudo_from_dt_ratio(k, 1.0, float(K_MAX)) for k in holds]
+    actions = jnp.zeros((3, ACTION_DIM)).at[:, -1].set(jnp.asarray(pseudos))
+    prediction, _ = model.sample(
+        3, model.cell.init, key, actions, initial_time=jnp.asarray(0.1)
+    )
+    times = prediction.next_state[:, -1]
+    expected = 0.1 + jnp.cumsum(jnp.asarray(holds, jnp.float32)) / 100.0
+    assert jnp.allclose(times, jnp.minimum(expected, 1.0), atol=1e-6)
+
+
+def test_openloop_imagined_cost_has_dt_gradient():
+    # The STE-masked composition gives the dt head a direct path into the
+    # imagined hold cost: backward is the boundary micro-step's discounted
+    # decode (the structural k-slope).
+    model = make_model()
+    key = jax.random.PRNGKey(16)
+
+    def summed_cost(dt_value):
+        actions = jnp.zeros((4, ACTION_DIM)).at[:, -1].set(dt_value)
+        prediction, _ = model.sample(4, model.cell.init, key, actions)
+        return prediction.cost.sum()
+
+    grad = jax.grad(summed_cost)(0.1)
+    assert jnp.isfinite(grad)
+    assert jnp.abs(grad) > 0.0
+
+
+def test_openloop_infer_state():
+    model = make_model()
+    observation = jax.random.uniform(jax.random.PRNGKey(17), (4, 64, 64)) - 0.5
+    action = jnp.array([0.2, -0.4, 0.5])
+    state = model.infer_state(
+        model.cell.init, observation, action, jax.random.PRNGKey(18)
+    )
+    assert state.stochastic.shape == (8,)
+    assert state.deterministic.shape == (32,)
+
+
+def test_openloop_diagnostics_run():
+    from actsafe.actsafe.world_model import (
+        imagined_vs_realized_cost,
+        k_slope_diagnostics,
+        openloop_micro_calibration,
+    )
+
+    model = make_model()
+    features, actions, exposure = _batch(jax.random.PRNGKey(19))
+    cost_steps = jax.random.uniform(jax.random.PRNGKey(20), (BATCH, HORIZON, K_MAX))
+    key = jax.random.PRNGKey(21)
+    safety_critic = lambda s: s.sum()
+
+    k_slope = k_slope_diagnostics(
+        model, safety_critic, features, actions, exposure, GAMMA_C, key
+    )
+    for name in ("perceived_cost", "perceived_qc", "realized_cost"):
+        assert jnp.isfinite(k_slope[f"agent/ct/kslope/{name}"])
+
+    micro = openloop_micro_calibration(
+        model, features, actions, exposure, cost_steps, key
+    )
+    assert "agent/openloop/micro_gap_i_0" in micro
+    assert "agent/openloop/micro_gap_i_3" in micro
+    assert "agent/openloop/micro_gap_i_7" not in micro  # k_max == 4
+    # Every position executes micro-step 0, so its count is the full batch.
+    assert int(micro["agent/openloop/micro_count_i_0"]) == BATCH * HORIZON
+    assert jnp.isfinite(micro["agent/openloop/agg_residual"])
+
+    imagination = imagined_vs_realized_cost(
+        model, features, actions, exposure, GAMMA_C, key
+    )
+    assert jnp.isfinite(imagination["agent/imagination/cost_return_gap"])
+
+
 def test_openloop_rejects_discrete_or_multireward():
     with pytest.raises(AssertionError):
         WorldModel(
