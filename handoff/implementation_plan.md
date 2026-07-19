@@ -105,13 +105,23 @@ Commit sequence (wip/tase-pointgoal):
 4. Agent/config wiring: `dynamics` flag plumbed (`actsafe.yaml` default `flow`,
    `safe_goal_tase.yaml` → `openloop`); hard-fail guard on old-pickle resume without step
    arrays; full pytest/ruff/mypy on Euler.
-5. **Interaction Budget** (locked Wave-2 design): config
+5. **Interaction Budget — DEFERRED (user decision 2026-07-19, "execute at a later stage").**
+   What DID land instead (required for openloop correctness): a **fixed per-decision price**
+   in imagination — `SafeModelBasedActorCritic.switch_price`, subtracted from the decoded
+   reward per imagined decision in `evaluate_actor` (CT only). Openloop needs this because
+   its per-step reward targets are RAW (the env's −switch_cost is a per-decision term and
+   cannot live in per-base-step targets); without it the switch_cost sweep axis would not
+   reach the dt head's planning at all. Flow passes price 0.0 (its decoder learns the
+   penalized reward); the OPAX exploration actor-critic keeps 0.0 (locked: no switch cost in
+   the exploration objective).
+   **OUTSTANDING (the deferred remainder, design locked):** config block
    `agent.continuous_time.interaction_budget {enabled, decisions_per_episode N, price_lr,
-   init_price}`; env factory passes `ConstantSwitchCost(0.0)` when enabled (stationary reward
-   targets); `evaluate_actor` subtracts scalar price λ_s per imagined decision before
-   λ-returns; dual ascent per epoch in the agent: λ_s ← max(0, λ_s + price_lr·(D−N)/N) with D
-   = realized decisions/episode from buffer lengths; logs `train/ct/switch_price`,
-   `decisions_per_episode`, `interaction_budget_violation`. LBSGD untouched.
+   init_price}`; env factories pass `ConstantSwitchCost(0.0)` when enabled (stationary reward
+   targets); dual ascent per epoch in the agent: λ_s ← max(0, λ_s + price_lr·(D−N)/N) with D
+   = realized decisions/episode (epoch summary / buffer lengths), written into
+   `actor_critic.switch_price` (the plumbing above is already the insertion point); logs
+   `train/ct/switch_price`, `decisions_per_episode`, `interaction_budget_violation`. LBSGD
+   untouched. Sweep B waits on this.
 6. Euler smoke (2 epochs, both dynamics modes; fps check → drop plan_horizon 15→8 if needed;
    NO local CPU training smoke — it breaks things) then launch.
 

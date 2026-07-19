@@ -67,6 +67,7 @@ class SafeModelBasedActorCritic:
         objective_sentiment: Sentiment,
         constraint_sentiment: Sentiment,
         actor_entropy_coef: float = 0.0,
+        switch_price: float = 0.0,
     ):
         actor_key, critic_key, safety_critic_key = jax.random.split(key, 3)
         self.actor = ContinuousActor(
@@ -95,6 +96,14 @@ class SafeModelBasedActorCritic:
         self.objective_sentiment = objective_sentiment
         self.constraint_sentiment = constraint_sentiment
         self.actor_entropy_coef = actor_entropy_coef
+        # Per-imagined-decision price subtracted from the decoded reward
+        # (openloop dynamics only): the per-step reward targets are RAW (the
+        # env's switch cost is a per-decision term and cannot live in
+        # per-base-step targets), so imagination must charge it analytically.
+        # Flow mode keeps 0.0 — its decoder learned the penalized reward.
+        # A dynamic value (dual ascent on an interaction budget) is the
+        # deferred Wave-2 extension; today this is the constant switch_cost.
+        self.switch_price = switch_price
 
     def update(
         self,
@@ -128,6 +137,8 @@ class SafeModelBasedActorCritic:
             self.objective_sentiment,
             self.constraint_sentiment,
             self.actor_entropy_coef,
+            # getattr: instances un-pickled from pre-switch-price checkpoints.
+            jnp.asarray(getattr(self, "switch_price", 0.0), jnp.float32),
         )
         self.actor = results.new_actor
         self.critic = results.new_critic
@@ -221,6 +232,7 @@ def evaluate_actor(
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
     actor_entropy_coef: float = 0.0,
+    switch_price: jax.Array | float = 0.0,
 ) -> ActorEvaluation:
     trajectories, priors = rollout_fn(horizon, initial_states, key, actor.act)
     
@@ -251,6 +263,10 @@ def evaluate_actor(
     next_states = next_step(trajectories.next_state)
     bootstrap_values = nest_vmap(critic, 2, eqx.filter_vmap)(next_states)
     rewards = current_step(objective_sentiment(trajectories.reward, priors))
+    if continuous_time:
+        # Per-decision price (openloop: the constant switch_cost; flow passes
+        # 0.0 — its decoder already learned the env-penalized reward).
+        rewards = rewards - switch_price
     lambda_values = eqx.filter_vmap(compute_lambda_values)(
         bootstrap_values, rewards, discount_current, lambda_
     )
@@ -321,6 +337,7 @@ def update_safe_actor_critic(
     objective_sentiment: Sentiment,
     constraint_sentiment: Sentiment,
     actor_entropy_coef: float = 0.0,
+    switch_price: jax.Array | float = 0.0,
 ) -> SafeActorCriticStepResults:
     vmapped_rollout_fn = jax.vmap(model.sample, (None, 0, None, None))
     actor_grads, new_penalty_state, evaluation, metrics, step_scale = penalty_fn(
@@ -342,6 +359,7 @@ def update_safe_actor_critic(
             objective_sentiment,
             constraint_sentiment,
             actor_entropy_coef,
+            switch_price,
         ),
         penalty_state,
         actor,

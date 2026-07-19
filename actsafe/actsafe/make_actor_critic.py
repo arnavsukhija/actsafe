@@ -47,6 +47,7 @@ def make_actor_critic(
     key,
     objective_sentiment=bayes,
     constraint_sentiment=bayes,
+    switch_price: float = 0.0,
 ):
 
     episode_safety_budget = compute_episode_safety_budget(cfg)
@@ -96,4 +97,8 @@ def make_actor_critic(
         objective_sentiment=objective_sentiment,
         constraint_sentiment=constraint_sentiment,
         actor_entropy_coef=cfg.agent.get("actor_entropy_coef", 0.0),
+        # Per-imagined-decision price (openloop task actor-critic only; the
+        # OPAX exploration instance keeps 0.0 — no switch cost in the
+        # exploration objective, per the locked 2026-07-05 decision).
+        switch_price=switch_price,
     )

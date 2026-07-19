@@ -135,6 +135,14 @@ class ActSafe:
                     "constraint_pessimism_source", "latent"
                 ),
             ),
+            # Openloop: the per-step reward targets are raw, so imagination
+            # charges the switch cost analytically per decision. Flow keeps
+            # 0.0 (decoder learns the env-penalized reward). The auto-tuned
+            # interaction budget (dual ascent on this price) is the deferred
+            # Wave-2 extension.
+            switch_price=float(ct_cfg.get("switch_cost", 0.0))
+            if ct_dynamics == "openloop"
+            else 0.0,
         )
         self.exploration = make_exploration(
             config,

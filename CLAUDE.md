@@ -22,10 +22,13 @@ k open-loop micro-predictions (latent-space SwitchCostWrapper) behind
 `agent.continuous_time.dynamics: flow | openloop` (`flow` kept as the A/B arm); per-base-step
 cost/reward targets stored from the wrapper; imagination aggregates per-decision via a
 fractional mask (imagination API contract frozen — `safe_actor_critic`/LBSGD/λ-returns/budget
-untouched); plus the auto-tuned **Interaction Budget** (dual ascent on a switch price,
-env-side switch cost zeroed when enabled). The SMDP decision layer is unchanged — variable
-frequency remains the agent's action. The paragraphs below describe the 2026-07-11 state and
-are superseded where they conflict.
+untouched). Openloop imagination charges the switch cost analytically per decision
+(`actor_critic.switch_price` — raw per-step reward targets can't carry the per-decision
+penalty); the auto-tuned **Interaction Budget** (dual ascent on that price, env-side switch
+cost zeroed) is designed but **DEFERRED** (user decision 2026-07-19) — see the handoff's
+outstanding item. The SMDP decision layer is unchanged — variable frequency remains the
+agent's action. The paragraphs below describe the 2026-07-11 state and are superseded where
+they conflict.
 
 **FIRST-PRINCIPLES REVIEW + COVERAGE-FIRST PURGE LANDED (2026-07-11)** — a strict SMDP
 architectural review (`code_review.md`, repo root — read it before touching the CT stack)

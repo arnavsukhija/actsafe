@@ -75,6 +75,14 @@ def test_tase_agent_end_to_end_smoke(dynamics):
     )
     agent = ActSafe(env.observation_space, env.action_space, cfg)
     assert agent.replay_buffer.has_step_arrays == (dynamics == "openloop")
+    # Openloop imagination charges the switch cost analytically (raw per-step
+    # reward targets); flow's decoder learns the env-penalized reward. The
+    # OPAX exploration objective never carries the price.
+    expected_price = (
+        cfg.agent.continuous_time.switch_cost if dynamics == "openloop" else 0.0
+    )
+    assert agent.actor_critic.switch_price == expected_price
+    assert agent.exploration.actor_critic.switch_price == 0.0
 
     # Roll one full episode through the real policy path.
     obs, _ = env.reset()
