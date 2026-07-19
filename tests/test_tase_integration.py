@@ -9,6 +9,7 @@ the analytic time recurrence.
 
 import gymnasium
 import numpy as np
+import pytest
 from gymnasium.spaces import Box
 
 from actsafe.actsafe.actsafe import ActSafe
@@ -39,7 +40,8 @@ class _PixelEnv(gymnasium.Env):
         return self._obs(), 0.1, False, False, {"cost": cost}
 
 
-def test_tase_agent_end_to_end_smoke():
+@pytest.mark.parametrize("dynamics", ["flow", "openloop"])
+def test_tase_agent_end_to_end_smoke(dynamics):
     cfg = make_test_config(
         [
             "training.safe=true",
@@ -59,6 +61,7 @@ def test_tase_agent_end_to_end_smoke():
             "agent.continuous_time.enabled=true",
             "agent.continuous_time.min_repeat=1",
             "agent.continuous_time.max_repeat=8",
+            f"agent.continuous_time.dynamics={dynamics}",
             "agent.exploration_strategy=opax",
             "agent.exploration_steps=1000000",
             "agent.offline_steps=0",
@@ -71,10 +74,12 @@ def test_tase_agent_end_to_end_smoke():
         switch_cost=ConstantSwitchCost(0.01),
     )
     agent = ActSafe(env.observation_space, env.action_space, cfg)
+    assert agent.replay_buffer.has_step_arrays == (dynamics == "openloop")
 
     # Roll one full episode through the real policy path.
     obs, _ = env.reset()
     observations, next_observations, actions, rewards, costs = [], [], [], [], []
+    cost_steps, reward_steps = [], []
     truncated = False
     sim_steps = 0
     while not truncated:
@@ -85,6 +90,8 @@ def test_tase_agent_end_to_end_smoke():
         actions.append(action)
         rewards.append(reward)
         costs.append(info["cost"])
+        cost_steps.append(info["cost_steps"])
+        reward_steps.append(info["reward_steps"])
         sim_steps += info["steps"]
         obs = next_obs
     assert sim_steps == 64  # horizon consumed exactly
@@ -95,6 +102,8 @@ def test_tase_agent_end_to_end_smoke():
         np.asarray(actions)[None],
         np.asarray(rewards)[None],
         np.asarray(costs)[None],
+        cost_steps=np.asarray(cost_steps)[None],
+        reward_steps=np.asarray(reward_steps)[None],
     )
     agent.observe(trajectory)
     agent.observe_transition(sim_steps=sim_steps)
@@ -107,6 +116,8 @@ def test_tase_agent_end_to_end_smoke():
     assert "agent/model/loss" in metrics
     assert any("/opax/" in k for k in metrics), sorted(metrics)
     assert np.isfinite(metrics["agent/model/loss"])
+    if dynamics == "openloop":
+        assert "agent/openloop/train_agg_residual" in metrics
 
     # report() must include the buffer dt-coverage diagnostics.
     from actsafe.rl.epoch_summary import EpochSummary
@@ -114,3 +125,36 @@ def test_tase_agent_end_to_end_smoke():
     report = agent.report(EpochSummary(), epoch=0, step=64)
     assert "train/ct/buffer/mean_dt" in report.metrics
     assert report.metrics["train/ct/buffer/frac_dt_1"] <= 1.0
+    if dynamics == "openloop":
+        assert "agent/openloop/micro_gap_i_0" in report.metrics
+        assert "agent/openloop/agg_residual" in report.metrics
+
+
+def test_openloop_refuses_legacy_buffer():
+    cfg = make_test_config(
+        [
+            "training.safe=true",
+            "training.time_limit=64",
+            "training.action_repeat=1",
+            "training.parallel_envs=1",
+            "agent.model.stochastic_size=8",
+            "agent.model.deterministic_size=16",
+            "agent.model.hidden_size=32",
+            "agent.model.continuous_time=true",
+            "agent.continuous_time.enabled=true",
+            "agent.continuous_time.min_repeat=1",
+            "agent.continuous_time.max_repeat=8",
+            "agent.continuous_time.dynamics=openloop",
+            "agent.offline_steps=0",
+        ]
+    )
+    env = SwitchCostWrapper(
+        _PixelEnv(max_steps=64), min_repeat=1, max_repeat=8
+    )
+    agent = ActSafe(env.observation_space, env.action_space, cfg)
+    # Simulate resuming a pre-openloop pickle: the buffer has no step arrays.
+    del agent.replay_buffer.cost_steps
+    agent.replay_buffer._valid_episodes = 1
+    agent.replay_buffer.lengths[0] = 60
+    with pytest.raises(RuntimeError, match="per-base-step"):
+        agent.update()

@@ -68,6 +68,15 @@ continuous_time:
                           # policy's dt preferences. Real-env rollouts only; imagination and
                           # all losses untouched.
   dt_exploration_steps: null  # sim-step length of the uniform-dt window; null = exploration_steps
+  # CT dynamics estimator (2026-07-19 revamp):
+  # - "flow": one-shot jump — the RSSM consumes the full action (dt dim included)
+  #   and predicts the whole hold's arrival latent in a single step (legacy /
+  #   ablation arm).
+  # - "openloop": latent-space SwitchCostWrapper — base-step RSSM (motor action
+  #   only), a hold is k composed micro-predictions with per-micro-step
+  #   reward/cost decodes; k never enters a network (structural k-dependence).
+  #   Requires per-step buffer targets (fresh runs only; old pickles hard-fail).
+  dynamics: flow
 plan_horizon: 15
 update_steps: 100
 train_every: 1000

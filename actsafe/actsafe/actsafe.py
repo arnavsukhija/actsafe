@@ -20,6 +20,7 @@ from actsafe.actsafe.world_model import (
     evaluate_model,
     imagined_vs_realized_cost,
     k_slope_diagnostics,
+    openloop_micro_calibration,
     variational_step,
 )
 from actsafe.rl import ct_time
@@ -76,6 +77,9 @@ class ActSafe:
     ):
         self.config = config
         num_rewards = 2 if self.config.agent.unsupervised else 1
+        ct_cfg = config.agent.get("continuous_time", {})
+        ct_enabled = ct_cfg.get("enabled", False)
+        ct_dynamics = ct_cfg.get("dynamics", "flow") if ct_enabled else "flow"
         self.replay_buffer = ReplayBuffer(
             observation_shape=observation_space.shape,
             action_shape=action_space.shape,
@@ -85,12 +89,14 @@ class ActSafe:
             batch_size=config.agent.replay_buffer.batch_size,
             capacity=config.agent.replay_buffer.capacity,
             num_rewards=num_rewards,
+            # Openloop needs the per-base-step targets (k_max-padded).
+            step_dim=int(ct_cfg.get("max_repeat", 1))
+            if ct_dynamics == "openloop"
+            else None,
         )
         self.prng = PRNGSequence(config.training.seed)
         action_dim = int(np.prod(action_space.shape))
         assert len(observation_space.shape) == 3
-        ct_cfg = config.agent.get("continuous_time", {})
-        ct_enabled = ct_cfg.get("enabled", False)
         self.model = WorldModel(
             image_shape=observation_space.shape,
             action_dim=action_dim,
@@ -101,6 +107,11 @@ class ActSafe:
             k_min=float(ct_cfg.get("min_repeat", 1)) if ct_enabled else 1.0,
             k_max=float(ct_cfg.get("max_repeat", 1)) if ct_enabled else 1.0,
             horizon_steps=float(config.training.time_limit) if ct_enabled else 1.0,
+            dynamics=ct_dynamics,
+            # Within-hold composition discounts (openloop only): the same
+            # discounts SwitchCostWrapper uses to build the aggregate targets.
+            hold_discount=float(config.agent.discount),
+            hold_cost_discount=float(config.agent.safety_discount),
             **config.agent.model,
         )
         self.model_learner = Learner(self.model, config.agent.model_optimizer)
@@ -246,6 +257,17 @@ class ActSafe:
                 "backfilled). Per-k calibration and coverage metrics would be "
                 "meaningless — start a fresh run."
             )
+        if self.model.dynamics == "openloop" and not getattr(
+            self.replay_buffer, "has_step_arrays", False
+        ):
+            # A pre-openloop checkpoint was resumed: no per-base-step targets
+            # exist, and fabricating them would corrupt the micro-step loss
+            # and every micro diagnostic. Refuse instead of training.
+            raise RuntimeError(
+                "Replay buffer lacks per-base-step cost/reward arrays but the "
+                "world model runs openloop dynamics — resumed from a "
+                "pre-openloop checkpoint? Start a fresh run."
+            )
         total_steps = self.config.agent.update_steps
         if (
             not self.should_explore()
@@ -263,6 +285,11 @@ class ActSafe:
                 batch.cost,
                 cost_realized=batch.cost_realized,
                 exposure=batch.exposure,
+                cost_steps=batch.cost_steps,
+                # Same scaling as the aggregate reward channel.
+                reward_steps=None
+                if batch.reward_steps is None
+                else batch.reward_steps * self.config.agent.reward_scale,
             )
             inferred_rssm_states = self.update_model(batch)
             initial_states = inferred_rssm_states.reshape(
@@ -306,6 +333,7 @@ class ActSafe:
     def update_model(self, batch: TrajectoryData) -> jax.Array:
         features, actions = _prepare_features(batch)
         inference_only = self.config.agent.unsupervised and not self.learn_model()
+        openloop = self.model.dynamics == "openloop"
         (self.model, self.model_learner.state), (loss, rest) = variational_step(
             features,
             actions,
@@ -317,12 +345,19 @@ class ActSafe:
             self.config.agent.free_nats,
             self.config.agent.kl_mix,
             inference_only=inference_only,
+            reward_steps=jnp.asarray(batch.reward_steps) if openloop else None,
+            cost_steps=jnp.asarray(batch.cost_steps) if openloop else None,
+            exposure=jnp.asarray(batch.exposure) if openloop else None,
         )
         self.metrics_monitor["agent/model/loss"] = float(loss.mean())
         self.metrics_monitor["agent/model/reconstruction"] = float(
             rest["reconstruction_loss"].mean()
         )
         self.metrics_monitor["agent/model/kl"] = float(rest["kl_loss"].mean())
+        if "openloop_agg_residual" in rest:
+            self.metrics_monitor["agent/openloop/train_agg_residual"] = float(
+                rest["openloop_agg_residual"]
+            )
         flat_states = rest["states"].flatten()
         if self.model.continuous_time:
             # Arrival-time fraction of each posterior state, read from the clock
@@ -391,6 +426,21 @@ class ActSafe:
                         next(self.prng),
                     )
                     metrics.update({k: float(v) for k, v in k_slope.items()})
+                if (
+                    self.model.dynamics == "openloop"
+                    and batch.cost_steps is not None
+                ):
+                    # Micro-step calibration: does the model see mid-hold
+                    # hazards at the right within-hold offset?
+                    micro = openloop_micro_calibration(
+                        self.model,
+                        features,
+                        actions,
+                        exposure,
+                        jnp.asarray(batch.cost_steps),
+                        next(self.prng),
+                    )
+                    metrics.update({k: float(v) for k, v in micro.items()})
         if self.config.agent.evaluate_model:
             batch = next(self.replay_buffer.sample(1))
             features, actions = _prepare_features(batch)

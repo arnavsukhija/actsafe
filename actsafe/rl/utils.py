@@ -34,9 +34,12 @@ def add_to_buffer(buffer, trajectory, reward_scale):
             # cost-calibration metrics (and the factored rate head, if enabled).
             cost_realized=trajectory.cost_realized,
             exposure=trajectory.exposure,
-            # Raw per-base-step sequences: openloop micro-step targets.
+            # Raw per-base-step sequences: openloop micro-step targets (reward
+            # scaled like the aggregate channel so the decodes share units).
             cost_steps=trajectory.cost_steps,
-            reward_steps=trajectory.reward_steps,
+            reward_steps=None
+            if trajectory.reward_steps is None
+            else trajectory.reward_steps * reward_scale,
         )
     )
 

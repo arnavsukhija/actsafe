@@ -55,6 +55,15 @@ agent:
     # coverage. Gates: train/ct/buffer/frac_dt_q1..q4 balanced during exploration,
     # agent/cost_calibration/gap_k_* ≈ 0 WITH non-trivial count_k_*.
     dt_exploration: uniform
+    # 2026-07-19 revamp: openloop dynamics — the world model executes a hold as
+    # k open-loop micro-predictions (latent-space SwitchCostWrapper) instead of
+    # a one-shot variable-k jump. Rationale (handoff 2026-07-19 section): the
+    # eta sweep showed clean teacher-forced per-k calibration but negative
+    # imagination/cost_return_gap and per-k recon error growing with k — the
+    # one-shot flow prediction itself is the bottleneck. Composition makes the
+    # k-dependence structural and the k=1-dominated buffer fully supervising.
+    # Set to "flow" for the A/B ablation arm.
+    dynamics: openloop
   # If the dt head saturates (train/ct/frac_dt_1 or frac_dt_max ~1, std_dt_ratio ~0),
   # give it its own init std by uncommenting (see handoff):
   # actor:
