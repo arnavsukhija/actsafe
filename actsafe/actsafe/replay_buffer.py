@@ -17,6 +17,7 @@ class ReplayBuffer:
         batch_size: int,
         sequence_length: int,
         num_rewards: int,
+        step_dim: int | None = None,
     ):
         self.episode_id = 0
         self.max_length = max_length
@@ -56,6 +57,17 @@ class ReplayBuffer:
         # stays the discounted-within-hold aggregate for the legacy head.
         self.cost_realized = np.zeros((capacity, max_length), dtype=self.dtype)
         self.exposure = np.ones((capacity, max_length), dtype=self.dtype)
+        # Raw per-base-step cost/reward sequences of each hold (k_max-padded;
+        # positions beyond `exposure` are padding): the openloop world model's
+        # micro-step targets. Allocated only when step_dim (= k_max) is given —
+        # ~64 MB each at (1000, 1000, 16), negligible next to the obs array.
+        if step_dim is not None:
+            self.cost_steps = np.zeros(
+                (capacity, max_length, step_dim), dtype=self.dtype
+            )
+            self.reward_steps = np.zeros(
+                (capacity, max_length, step_dim), dtype=self.dtype
+            )
         # Track the actual (non-padded) length of each stored episode.
         # Episodes shorter than max_length are zero-padded; this array tells
         # _sample_batch() where the real data ends.
@@ -79,6 +91,14 @@ class ReplayBuffer:
             self.exposure = np.ones_like(self.cost)
             self.aux_backfilled = True
 
+    @property
+    def has_step_arrays(self) -> bool:
+        # False for buffers un-pickled from pre-openloop checkpoints: no
+        # per-step targets exist there, and fabricating them would let every
+        # micro-step diagnostic read clean for a data-corruption reason.
+        # ActSafe.update() hard-fails on this in openloop mode.
+        return hasattr(self, "cost_steps") and hasattr(self, "reward_steps")
+
     def add(self, trajectory: TrajectoryData):
         self._ensure_aux_arrays()
         capacity, *_ = self.reward.shape
@@ -87,16 +107,7 @@ class ReplayBuffer:
         end = min(self.episode_id + batch_size, capacity)
         episode_slice = slice(self.episode_id, end)
         if trajectory.reward.ndim == 2:
-            trajectory = TrajectoryData(
-                trajectory.observation,
-                trajectory.next_observation,
-                trajectory.action,
-                trajectory.reward[..., None],
-                trajectory.cost,
-                trajectory.cost_realized,
-                trajectory.reward_realized,
-                trajectory.exposure,
-            )
+            trajectory = trajectory._replace(reward=trajectory.reward[..., None])
         # Actual episode length (may be shorter than max_length in continuous time).
         actual_len = min(trajectory.action.shape[1], self.max_length)
         # Fallbacks for trajectories built without the aux fields (e.g. tests):
@@ -129,6 +140,16 @@ class ReplayBuffer:
             ),
         ):
             data[episode_slice, :actual_len] = val[:batch_size, :actual_len].astype(self.dtype)
+        if self.has_step_arrays:
+            for data, val in zip(
+                (self.cost_steps, self.reward_steps),
+                (trajectory.cost_steps, trajectory.reward_steps),
+            ):
+                data[episode_slice] = 0
+                if val is not None:
+                    data[episode_slice, :actual_len] = val[
+                        :batch_size, :actual_len
+                    ].astype(self.dtype)
         observation = np.concatenate(
             [
                 trajectory.observation[:batch_size, :actual_len],
@@ -185,9 +206,12 @@ class ReplayBuffer:
                     self.exposure,
                 )
             ]
+            step_index = (episode_ids[:, None], timestep_ids[:, :-1])
+            cs = self.cost_steps[step_index] if self.has_step_arrays else None
+            rs = self.reward_steps[step_index] if self.has_step_arrays else None
             o = self.observation[episode_ids[:, None], timestep_ids]
             o, next_o = o[:, :-1], o[:, 1:]
-            yield o, next_o, a, r, c, cr, k
+            yield o, next_o, a, r, c, cr, k, cs, rs
 
     def sample(self, n_batches: int) -> Iterator[TrajectoryData]:
         if self.empty:
@@ -199,9 +223,17 @@ class ReplayBuffer:
             return
         iterator = (
             TrajectoryData(
-                o, next_o, a, r, c, cost_realized=cr, exposure=k
+                o,
+                next_o,
+                a,
+                r,
+                c,
+                cost_realized=cr,
+                exposure=k,
+                cost_steps=cs,
+                reward_steps=rs,
             )  # type: ignore
-            for o, next_o, a, r, c, cr, k in (
+            for o, next_o, a, r, c, cr, k, cs, rs in (
                 next(batch_gen) for _ in range(n_batches)
             )
         )

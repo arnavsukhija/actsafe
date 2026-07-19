@@ -26,6 +26,12 @@ class Transition(NamedTuple):
     # factored rate cost head: the world model learns a per-base-step cost
     # rate from (cost_realized, exposure) pairs. None falls back to 1.
     exposure: npt.NDArray[Any] | None = None
+    # Raw per-base-step cost/reward sequences of the hold, zero-padded to k_max
+    # (SwitchCostWrapper's info['cost_steps']/['reward_steps']; undiscounted, no
+    # switch cost). Micro-step targets for the openloop world model; positions
+    # beyond `exposure` are padding. None on the discrete path.
+    cost_steps: npt.NDArray[Any] | None = None
+    reward_steps: npt.NDArray[Any] | None = None
 
 
 TrajectoryData = Transition
@@ -44,7 +50,7 @@ class Trajectory:
         # this magic is possible since transition is a named tuple.
         # This allows us make lists of observations, actions, rewards, etc.,
         # instead of list of transitions.
-        o, next_o, a, r, c, cr, rr, k = zip(*self.transitions)
+        o, next_o, a, r, c, cr, rr, k, cs, rs = zip(*self.transitions)
         # Stack on axis=1 to keep batch dimension first, and time axis second.
         stack = lambda x: np.stack(x, axis=1)
         # cost_realized / reward_realized may be absent (None) for transitions built
@@ -62,5 +68,8 @@ class Trajectory:
             cr_stacked,
             rr_stacked,
             k_stacked,
+            # Per-step sequences exist only on the SwitchCostWrapper path.
+            None if cs[0] is None else stack(cs),
+            None if rs[0] is None else stack(rs),
         )
         return data

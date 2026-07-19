@@ -78,6 +78,11 @@ def interact(
                     # Executed base steps of the hold — the exposure of the
                     # factored rate cost head (action_repeat on discrete envs).
                     exposure = infos[i].get("steps", environment.action_repeat)
+                    # Raw per-base-step sequences (SwitchCostWrapper only): the
+                    # openloop world model's micro-step targets. None on the
+                    # discrete path.
+                    cost_steps = infos[i].get("cost_steps")
+                    reward_steps = infos[i].get("reward_steps")
                     transition = Transition(
                         observations[i:i+1],
                         next_observations[i:i+1],
@@ -87,6 +92,8 @@ def interact(
                         np.array([cost_realized]),
                         np.array([reward_realized]),
                         np.array([exposure], dtype=np.float32),
+                        None if cost_steps is None else np.asarray(cost_steps, dtype=np.float32)[None],
+                        None if reward_steps is None else np.asarray(reward_steps, dtype=np.float32)[None],
                     )
                     per_env_trajectories[i].transitions.append(transition)
                 

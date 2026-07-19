@@ -205,12 +205,17 @@ class SwitchCostWrapper(Wrapper):
         current_step = 0
         info = {"steps": 0}
         intermediate_states = []
+        # Raw per-base-step sequences of the hold (undiscounted, no switch cost),
+        # zero-padded to k_max: the openloop world model's micro-step targets.
+        # Padding beyond info['steps'] is zeros; consumers mask by exposure.
+        cost_steps = np.zeros(self.k_max, dtype=np.float32)
+        reward_steps = np.zeros(self.k_max, dtype=np.float32)
 
         obs = None
         while current_step < num_repetitions and not (done or truncated):
             obs, reward, done, truncated, step_info = self.env.step(u)
             intermediate_states.append(obs)
-            
+
             # Discount reward and cost within the hold (chunk-invariant macro-MDP); raw
             # cost summed separately for the d=25 metric. See handoff for the derivation.
             step_cost = step_info.get('cost', 0.0)
@@ -218,6 +223,8 @@ class SwitchCostWrapper(Wrapper):
             total_reward_realized += reward
             total_cost += (self.cost_discounting ** current_step) * step_cost
             total_cost_realized += step_cost
+            cost_steps[current_step] = step_cost
+            reward_steps[current_step] = reward
             
             # Update info with latest from step_info (excluding specific accumulation keys)
             for k, v in step_info.items():
@@ -248,6 +255,8 @@ class SwitchCostWrapper(Wrapper):
         info['reward_realized'] = total_reward_realized
         info['dt'] = current_step * self.dt          # physical seconds, debug only
         info['intermediate_states'] = intermediate_states
+        info['cost_steps'] = cost_steps              # raw per-base-step costs, k_max-padded
+        info['reward_steps'] = reward_steps          # raw per-base-step rewards, k_max-padded
         
         return augmented_obs, float(total_reward), done, truncated, info
 
