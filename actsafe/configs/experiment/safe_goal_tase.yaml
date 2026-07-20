@@ -34,6 +34,9 @@ agent:
   exploration_steps: 500000   # matches the dense baseline
   model:
     continuous_time: true     # strip the appended time-to-go channel before the world model
+    decoder_action_cond: false  # openloop: motor-u decoder conditioning is vestigial (the
+                                # per-base-step latent already encodes the ZOH-constant u);
+                                # state-only = upstream-faithful. Decision 2026-07-20.
   sentiment:
     constraint_pessimism: 0.1  # same honest safety margin as the baseline (held fixed)
   actor_entropy_coef: 0.01     # entropy bonus keeps the action + dt heads exploring

@@ -21,6 +21,10 @@ model:
   deterministic_size: 200
   continuous_time: false  # CT: keep CNNs on pixels; carry the elapsed-time clock as a
                           # scalar alongside the latent (full-MDP time). Set true for CT exps.
+  decoder_action_cond: true  # Openloop only: condition reward/cost decoder on the motor
+                             # action. Vestigial in openloop (the per-base-step latent
+                             # already encodes the ZOH-constant u); false = upstream
+                             # state-only decoder. Ignored by flow/discrete.
 actor:
   n_layers: 4
   hidden_size: 400

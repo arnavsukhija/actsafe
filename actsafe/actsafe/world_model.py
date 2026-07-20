@@ -134,6 +134,11 @@ class WorldModel(eqx.Module):
     dynamics: str = eqx.field(static=True)
     hold_discount: float = eqx.field(static=True)
     hold_cost_discount: float = eqx.field(static=True)
+    # Openloop only: condition the reward/cost decoder on the (motor) action.
+    # Motivated for "flow" (the arrival latent can't see mid-hold events); in
+    # openloop the per-base-step latent already encodes the ZOH-constant u, so u
+    # is vestigial — False reverts to the upstream state-only decoder.
+    decoder_action_cond: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -152,6 +157,7 @@ class WorldModel(eqx.Module):
         dynamics: str = "flow",
         hold_discount: float = 1.0,
         hold_cost_discount: float = 1.0,
+        decoder_action_cond: bool = True,
         *,
         key,
     ):
@@ -174,6 +180,7 @@ class WorldModel(eqx.Module):
             assert num_rewards == 1, "openloop supports a single reward channel"
         self.continuous_time = continuous_time
         self.dynamics = dynamics
+        self.decoder_action_cond = bool(decoder_action_cond)
         self.hold_discount = float(hold_discount)
         self.hold_cost_discount = float(hold_cost_discount)
         self.k_min = float(k_min)
@@ -209,7 +216,7 @@ class WorldModel(eqx.Module):
         # Openloop decodes per-base-step (s_i, u) quantities: no dt input — the
         # k-dependence of the hold cost is structural (composition), not learned.
         if dynamics == "openloop":
-            decoder_action_dim = action_dim - 1
+            decoder_action_dim = (action_dim - 1) if decoder_action_cond else 0
         elif continuous_time:
             decoder_action_dim = action_dim
         else:
@@ -223,6 +230,21 @@ class WorldModel(eqx.Module):
             key=reward_cost_decoder_key,
             activation=jnn.elu,
         )
+
+    def _openloop_decoder_in(self, flat: jax.Array, u: jax.Array) -> jax.Array:
+        """Openloop reward/cost decoder input: [flat_state, (motor u)].
+
+        The held motor action u is broadcast across whatever leading axes `flat`
+        carries (k_max, ensemble×k_max, batch×time, …). When
+        `decoder_action_cond` is False the decoder is state-only (upstream
+        shape), so u is dropped entirely.
+        """
+        if not self.decoder_action_cond:
+            return flat
+        u_b = jnp.broadcast_to(
+            u.astype(flat.dtype), flat.shape[:-1] + (u.shape[-1],)
+        )
+        return jnp.concatenate([flat, u_b], -1)
 
     def _unroll_hold_member(
         self, prior, state: State, u: jax.Array, key: jax.Array
@@ -302,11 +324,8 @@ class WorldModel(eqx.Module):
             # Per-micro-step decode along the member's open-loop path, exactly
             # what imagination composes: [k_max, num_rewards + 1].
             micro_flat = micro_states.flatten()
-            tiled_u = jnp.broadcast_to(
-                u.astype(micro_flat.dtype), (k_max,) + u.shape
-            )
             micro_rc = jax.vmap(self.reward_cost_decoder)(
-                jnp.concatenate([micro_flat, tiled_u], -1)
+                self._openloop_decoder_in(micro_flat, u)
             )
             return state, (state, posterior, prior, micro_rc)
 
@@ -449,11 +468,8 @@ class WorldModel(eqx.Module):
             unroll_key, member_key = jax.random.split(key)
             micro_states, micro_priors = self._unroll_hold(prev_state, u, unroll_key)
             micro_flat = micro_states.flatten()  # [ensemble, k_max, state_dim]
-            tiled_u = jnp.broadcast_to(
-                u.astype(micro_flat.dtype), micro_flat.shape[:2] + u.shape
-            )
             micro_rc = nest_vmap(self.reward_cost_decoder, 2)(
-                jnp.concatenate([micro_flat, tiled_u], -1)
+                self._openloop_decoder_in(micro_flat, u)
             )  # [ensemble, k_max, num_rewards + 1]
             dt_raw = ct_time.dt_raw_from_pseudo(pseudo, self.k_min, self.k_max)
             k_exec = ct_time.dt_ratio_from_pseudo_jnp(pseudo, self.k_min, self.k_max)
@@ -1046,5 +1062,73 @@ def openloop_micro_calibration(
     metrics[f"{prefix}micro_count_hazard"] = positive_count
     metrics[f"{prefix}agg_residual"] = (
         result.reward_cost[..., -1] - features.cost
+    ).mean()
+
+    # --- A/B amplifier separator (read-only, 2026-07-20) ---------------------
+    # The central question: is the cost head's optimism FLAT in hold length k
+    # (⇒ zero-inflated MSE shrinkage, an amplifier-A / head problem) or does it
+    # GROW with k (⇒ the open-loop prior loses the hazard mid-hold, an
+    # amplifier-B / dynamics problem)? Bin the per-micro-step bias by the parent
+    # hold's executed length. NEGATIVE = optimistic. A flat-vs-rising trend
+    # across bias_k_* picks the fix; the head rewrite and the overshooting/
+    # mid-hold-observation change are mutually exclusive work, so measure first.
+    cprefix = "agent/cost_calib/"
+    buckets = (("k_1", 1, 1), ("k_2_4", 2, 4), ("k_5_8", 5, 8), ("k_9plus", 9, k_max))
+    for name, lo, hi in buckets:
+        if lo > k_max:
+            continue
+        in_bucket = (exposure >= lo) & (exposure <= hi)  # [batch, time]
+        bmask = (valid & in_bucket[..., None]).astype(micro_cost.dtype)
+        bcount = bmask.sum()
+        metrics[f"{cprefix}bias_{name}"] = jnp.where(
+            bcount > 0, (gap * bmask).sum() / jnp.maximum(bcount, 1.0), 0.0
+        )
+        metrics[f"{cprefix}count_{name}"] = bcount
+        # Hazard-conditioned (positive base steps only) — where optimism bites.
+        hmask = ((cost_steps > 0) & valid & in_bucket[..., None]).astype(micro_cost.dtype)
+        hcount = hmask.sum()
+        metrics[f"{cprefix}bias_hazard_{name}"] = jnp.where(
+            hcount > 0, (gap * hmask).sum() / jnp.maximum(hcount, 1.0), 0.0
+        )
+        metrics[f"{cprefix}count_hazard_{name}"] = hcount
+
+    # Reliability / expected calibration error on the binary cost target, over
+    # all valid micro-steps. MSE shrinkage shows as ECE>0 with the predicted
+    # probability sitting below the empirical hazard frequency. Predictions are
+    # clipped to [0,1] for binning (the MSE head is unbounded).
+    valid_f = valid.astype(micro_cost.dtype)
+    total = jnp.maximum(valid_f.sum(), 1.0)
+    pred_c = jnp.clip(micro_cost, 0.0, 1.0)
+    target_b = (cost_steps > 0).astype(micro_cost.dtype)
+    n_bins = 10
+    ece = jnp.zeros((), micro_cost.dtype)
+    for b in range(n_bins):
+        blo, bhi = b / n_bins, (b + 1) / n_bins
+        upper = pred_c <= bhi if b == n_bins - 1 else pred_c < bhi
+        in_bin = (valid & (pred_c >= blo) & upper).astype(micro_cost.dtype)
+        n_b = jnp.maximum(in_bin.sum(), 1.0)
+        conf_b = (pred_c * in_bin).sum() / n_b
+        acc_b = (target_b * in_bin).sum() / n_b
+        ece = ece + (in_bin.sum() / total) * jnp.abs(acc_b - conf_b)
+    metrics[f"{cprefix}ece"] = ece
+
+    # Amplifier-B probe that needs NO mid-hold observations: at arrival we hold
+    # both the open-loop prior micro-state (already decoded in micro_cost) and
+    # the observation-corrected posterior state (result.state). Decode cost from
+    # the posterior arrival and compare. Strongly NEGATIVE ⇒ the prior
+    # under-represents the just-crossed hazard even at the boundary — direct
+    # evidence the mid-hold optimism is dynamics-side, not head-side.
+    arrival_idx = jnp.clip(exposure.astype(jnp.int32) - 1, 0, k_max - 1)
+    prior_arrival_cost = jnp.take_along_axis(
+        micro_cost, arrival_idx[..., None], axis=-1
+    )[..., 0]
+    post_flat = result.state.flatten()  # [batch, time, feat]
+    u_motor = actions[..., :-1].astype(post_flat.dtype)
+    decode_cost = lambda s, u: model.reward_cost_decoder(
+        model._openloop_decoder_in(s, u)
+    )[..., -1]
+    post_arrival_cost = jax.vmap(jax.vmap(decode_cost))(post_flat, u_motor)
+    metrics[f"{cprefix}arrival_prior_minus_posterior"] = (
+        prior_arrival_cost - post_arrival_cost
     ).mean()
     return metrics
