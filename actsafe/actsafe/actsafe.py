@@ -187,11 +187,37 @@ class ActSafe:
         self.metrics_monitor = MetricsMonitor()
         self.zero_shot = False
 
+    def _ensure_dt_exploration(self) -> None:
+        """Resume-safety for the uniform-dt exploration override.
+
+        Agents un-pickled from a checkpoint predating the dt-exploration schedule
+        (2026-07-11) lack `_dt_exploration_uniform` / `should_explore_dt`. Before,
+        `__call__` read them via `getattr(..., False)`, so such a resume SILENTLY
+        disabled the override — the executed dt then collapsed to the acting
+        policy's choice (OPAX drives it to 1), poisoning the buffer's large-k
+        coverage (observed: frac_dt_1 climbing to ~0.9 right after offline_steps).
+        Rebuild the schedule from the retained config instead, seeding the counter
+        from the OPAX exploration clock they share, so the override survives.
+        """
+        if hasattr(self, "should_explore_dt"):
+            return
+        ct_cfg = self.config.agent.get("continuous_time", {})
+        self._dt_exploration_uniform = bool(
+            ct_cfg.get("enabled", False)
+            and ct_cfg.get("dt_exploration", "policy") == "uniform"
+        )
+        dt_exploration_steps = ct_cfg.get("dt_exploration_steps", None)
+        if dt_exploration_steps is None:
+            dt_exploration_steps = self.config.agent.exploration_steps
+        self.should_explore_dt = Until(dt_exploration_steps, steps=1)
+        self.should_explore_dt.count = getattr(self.should_explore, "count", 0)
+
     def __call__(
         self,
         observation: FloatArray,
         train: bool = False,
     ) -> FloatArray:
+        self._ensure_dt_exploration()
         # Fire a training update every _train_every accumulated sim steps.
         # The remainder is carried forward so no sim steps are "lost" across calls.
         should_train_now = self._train_sim_steps >= self._train_every

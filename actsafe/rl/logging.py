@@ -1,4 +1,3 @@
-import hashlib
 import json
 import logging
 import os
@@ -16,6 +15,17 @@ from tabulate import tabulate
 
 
 _SUMMARY_DEFAULT = "summary"
+
+
+def _persist_wandb_id(id_path: str, run_id: str) -> None:
+    """Write the wandb run id into the run directory so a later requeue of THIS
+    run reattaches to it. Deleting the run directory removes the file, which is
+    exactly what makes a relaunch a fresh run. Failures are non-fatal."""
+    try:
+        with open(id_path, "w") as f:
+            f.write(run_id)
+    except OSError as e:
+        logging.getLogger("wandb").warning(f"Could not persist wandb id: {e}")
 
 
 class Writer(Protocol):
@@ -156,25 +166,40 @@ class WeightAndBiasesWriter:
         assert isinstance(config_dict, dict)
         
         wandb_kwargs = dict(config.wandb)
+        # Persist the run id IN the run directory (not derived from the path).
+        #
+        # A slurm requeue/pickle resume re-enters the same cwd, finds this file,
+        # and reattaches to the SAME wandb run instead of forking — the
+        # fragmentation the 2026-07-07 audit fixed (a run splitting across 2+
+        # random ids). But the previous fix keyed the id on md5(os.getcwd()),
+        # which is a pure function of the PATH: relaunching a sweep whose
+        # overrides repeat an earlier one's resolves to the same cwd -> the same
+        # id -> resume="allow" silently reattached a brand-new run to the old
+        # one. Worse, md5(cwd) is recomputed even after the local dir is deleted,
+        # so the server-side run kept being resumed. Keying on a file instead
+        # makes "delete the run dir" mean "fresh run" (the id is gone), while an
+        # untouched dir still resumes cleanly on requeue.
+        resume_mode: str | bool = "allow"
+        id_path = os.path.join(os.getcwd(), "wandb_run_id")
         if not wandb_kwargs.get("id"):
-            # Deterministic id from the hydra run dir (== os.getcwd(), the same path
-            # trainer.should_resume() checks for state.pkl): a slurm requeue/pickle
-            # resume always re-enters this same directory, so it now reattaches to
-            # the SAME wandb run instead of forking a new one. Audited 2026-07-07:
-            # every crashed+resumed sweep run in actsafe-ct-pointgoal split across 2+
-            # wandb runs (e.g. czo8evls covers steps 50k-1.35M, wee7kzun continues
-            # 1.35M-1.65M under a fresh random id) — fragmenting any single run's
-            # learning curve, including the per-k calibration metrics this sweep
-            # needs to read cleanly.
-            wandb_kwargs["id"] = hashlib.md5(os.getcwd().encode()).hexdigest()[:16]
+            if os.path.exists(id_path):
+                with open(id_path) as f:
+                    wandb_kwargs["id"] = f.read().strip()
+                resume_mode = "allow"
+            else:
+                wandb_kwargs["id"] = wandb.util.generate_id()
+                resume_mode = False
+                # Persist before init so a crash-before-first-checkpoint requeue
+                # still reattaches instead of forking a second run.
+                _persist_wandb_id(id_path, wandb_kwargs["id"])
         wandb_settings = wandb.Settings(
             init_timeout=3600
         )
 
         try:
             wandb.init(
-                resume="allow", 
-                config=config_dict, 
+                resume=resume_mode,
+                config=config_dict,
                 settings=wandb_settings,
                 **wandb_kwargs
             )
@@ -184,11 +209,12 @@ class WeightAndBiasesWriter:
                 logging.getLogger("wandb").warning(
                     f"WandB run {wandb_kwargs.get('id')} was deleted or conflicted. Starting a new run instead."
                 )
-                # Remove the ID so WandB generates a new one
-                wandb_kwargs.pop("id", None)
+                # Mint a fresh id, repersist it, and start clean.
+                wandb_kwargs["id"] = wandb.util.generate_id()
+                _persist_wandb_id(id_path, wandb_kwargs["id"])
                 wandb.init(
-                    resume=False, 
-                    config=config_dict, 
+                    resume=False,
+                    config=config_dict,
                     settings=wandb_settings,
                     **wandb_kwargs
                 )

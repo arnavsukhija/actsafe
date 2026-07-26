@@ -945,11 +945,13 @@ def k_slope_diagnostics(
             u = action[:-1]
             micro_states, _ = model._unroll_hold(state, u, key)
             micro_flat = micro_states.flatten()
-            tiled = jnp.broadcast_to(
-                u.astype(micro_flat.dtype), micro_flat.shape[:2] + u.shape
-            )
+            # Route through the decoder-input helper so this matches the actual
+            # decoder conditioning: with decoder_action_cond=False the head is
+            # state-only, and concatenating u here would feed state_dim+action_dim
+            # into a state_dim decoder (shape error). The helper broadcasts u
+            # across the [ensemble, k_max] axes only when conditioning is on.
             micro_cost = nest_vmap(model.reward_cost_decoder, 2)(
-                jnp.concatenate([micro_flat, tiled], -1)
+                model._openloop_decoder_in(micro_flat, u)
             )[..., -1]  # [ensemble, k_max]
 
             def at_k(k: int):
